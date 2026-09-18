@@ -201,15 +201,17 @@ body, html {
 }
 
 /* Left Channel Rack - STRICT ALIGNMENT WITH CANVAS */
+/* Left Channel Rack - STRICT ALIGNMENT WITH CANVAS */
 .channel-rack {
-  width: 320px;
-  min-width: 300px;
+  width: 345px;
+  min-width: 320px;
   background-color: var(--bg-panel);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+  transition: width 0.15s ease;
 }
 
 /* Exactly 64px to match canvas rulerHeight */
@@ -230,6 +232,7 @@ body, html {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 4px;
 }
 
 .rack-title {
@@ -239,11 +242,71 @@ body, html {
   color: var(--text-muted);
 }
 
+.rack-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.add-lane-btn-group {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.add-lane-btn-group .btn-arrow {
+  padding-left: 4px;
+  padding-right: 4px;
+  margin-left: 1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.add-lane-btn-group #btn-add-lane {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.add-lane-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+  z-index: 200;
+  min-width: 155px;
+  padding: 4px 0;
+}
+
+.add-lane-menu-item {
+  padding: 6px 12px;
+  font-size: 0.74rem;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.add-lane-menu-item:hover {
+  background-color: var(--bg-input);
+  color: #4a9eff;
+}
+
 .rack-sub-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   font-size: 0.75rem;
+  min-width: 0;
+}
+
+.rack-sub-line select {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lanes-list {
@@ -252,7 +315,7 @@ body, html {
   overflow-x: hidden;
 }
 
-/* Lane Item Card - EXACTLY 58px TALL TO MATCH CANVAS TRACKS */
+/* Lane Item Card - Standard 58px TALL TO MATCH CANVAS TRACKS */
 .lane-item {
   height: 58px;
   min-height: 58px;
@@ -266,6 +329,48 @@ body, html {
   gap: 4px;
   border-left-width: 4px;
   border-left-style: solid;
+  position: relative;
+  box-sizing: border-box;
+  transition: background-color 0.15s ease, border-left-width 0.15s ease;
+}
+
+/* Active Playing Lane Indicator Flash */
+.lane-item.is-playing {
+  background-color: #242c40 !important;
+  box-shadow: inset 4px 0 10px rgba(0, 229, 255, 0.22);
+}
+
+/* Drag-and-drop file hover state */
+.lane-item.drag-over {
+  background-color: rgba(0, 229, 255, 0.15) !important;
+  border: 2px dashed #00e5ff !important;
+}
+
+/* Compact / Collapsed Lane Mode (image 34) */
+.channel-rack.is-compact .lane-item {
+  height: 28px;
+  min-height: 28px;
+  max-height: 28px;
+  padding: 2px 6px;
+  gap: 0;
+}
+
+.channel-rack.is-compact .lane-controls-row {
+  display: none;
+}
+
+.channel-rack.is-compact .lane-top-row {
+  height: 100%;
+}
+
+.channel-rack.is-compact .lane-name-input {
+  font-size: 0.74rem;
+  padding: 0 2px;
+}
+
+.channel-rack.is-compact .lane-btns button {
+  padding: 1px 4px;
+  font-size: 0.58rem;
 }
 
 .lane-top-row {
@@ -273,17 +378,57 @@ body, html {
   justify-content: space-between;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+}
+
+.lane-name-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.lane-activity-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #374151;
+  flex-shrink: 0;
+  transition: all 0.12s ease;
+}
+
+.lane-item.is-playing .lane-activity-led {
+  background-color: #00e5ff;
+  box-shadow: 0 0 6px #00e5ff, 0 0 10px #00e5ff;
+  transform: scale(1.35);
+}
+
+.badge-custom-sample {
+  font-size: 0.55rem;
+  font-weight: 700;
+  background: rgba(0, 229, 255, 0.18);
+  color: #00e5ff;
+  border: 1px solid rgba(0, 229, 255, 0.4);
+  border-radius: 2px;
+  padding: 0 3px;
+  flex-shrink: 0;
 }
 
 .lane-name-input {
   background: transparent;
   border: 1px solid transparent;
   color: var(--text-main);
-  font-size: 0.82rem;
+  font-size: 0.80rem;
   font-weight: 600;
   padding: 1px 3px;
   border-radius: 3px;
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 50px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lane-name-input:focus {
@@ -293,6 +438,7 @@ body, html {
 }
 
 .lane-btns {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -304,7 +450,7 @@ body, html {
   color: var(--text-muted);
   font-size: 0.62rem;
   font-weight: 700;
-  padding: 2px 5px;
+  padding: 2px 4px;
   border-radius: 3px;
   cursor: pointer;
   letter-spacing: 0.3px;
@@ -317,11 +463,11 @@ body, html {
 }
 
 .lane-btns button.btn-mute {
-  min-width: 40px;
+  min-width: 36px;
 }
 
 .lane-btns button.btn-solo {
-  min-width: 38px;
+  min-width: 34px;
 }
 
 .lane-btns button.btn-mute.active {
@@ -352,7 +498,7 @@ body, html {
 .lane-controls-row {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   font-size: 0.72rem;
 }
 
@@ -364,7 +510,7 @@ body, html {
 }
 
 .lane-custom-idx {
-  width: 32px;
+  width: 30px;
   background-color: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-main);
@@ -372,6 +518,39 @@ body, html {
   padding: 1px 2px;
   font-size: 0.72rem;
   text-align: center;
+}
+
+.lane-vol-group {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.lane-volume-input, .vol-num-input {
+  width: 38px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  border-radius: 3px;
+  padding: 1px 2px;
+  font-size: 0.72rem;
+  font-family: monospace;
+  text-align: right;
+}
+
+.lane-volume-input:focus, .vol-num-input:focus {
+  border-color: var(--border-focus);
+  outline: none;
+}
+
+.vol-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.pct-sign {
+  font-size: 0.68rem;
+  color: var(--text-muted);
 }
 
 /* Sequencer Area */

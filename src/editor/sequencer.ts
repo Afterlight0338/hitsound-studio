@@ -36,6 +36,7 @@ export class Sequencer {
   public activeSnapDivisor = 4; // 1/4 default
   public followPlayhead = true;
   public showGhostNotes = true;
+  public activePlayingLaneIds = new Set<string>();
 
   // Selection & Mouse States
   public selectedTriggerIds = new Set<string>();
@@ -165,6 +166,44 @@ export class Sequencer {
   public setZoom(zoom: number) {
     this.zoomPxPerSec = Math.max(20, Math.min(4000, zoom));
     this.render();
+  }
+
+  public setLaneHeight(height: number) {
+    this.laneHeight = Math.max(20, height);
+    this.render();
+  }
+
+  public setActivePlayingLanes(laneIds: Set<string>) {
+    this.activePlayingLaneIds = laneIds;
+  }
+
+  public getActiveLaneIds(currentMs: number, windowMs: number = 90): Set<string> {
+    const active = new Set<string>();
+    if (this.triggers.length === 0) return active;
+
+    const startMs = currentMs - windowMs;
+    const endMs = currentMs + 20;
+
+    let low = 0;
+    let high = this.triggers.length - 1;
+    let startIdx = this.triggers.length;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (this.triggers[mid].time >= startMs) {
+        startIdx = mid;
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+
+    for (let i = startIdx; i < this.triggers.length; i++) {
+      const tr = this.triggers[i];
+      if (tr.time > endMs) break;
+      active.add(tr.laneId);
+    }
+
+    return active;
   }
 
   public resetView() {
@@ -323,13 +362,6 @@ export class Sequencer {
       // Top highlight border
       this.ctx.fillStyle = '#ffaa00';
       this.ctx.fillRect(startX, 0, w, 3);
-
-      // Stylish label at kiai start if visible
-      if (startX >= 0 && startX <= width - 50) {
-        this.ctx.fillStyle = 'rgba(255, 170, 0, 0.95)';
-        this.ctx.font = 'bold 9px monospace';
-        this.ctx.fillText('🔥 KIAI', startX + 4, 12);
-      }
     }
 
     // Draw Audio Waveform inside ruler
@@ -496,10 +528,16 @@ export class Sequencer {
           : (i % 2 === 0 ? '#161922' : '#1a1e28');
         this.ctx.fillRect(0, y, width, this.laneHeight);
 
-        // Subtle lane accent tint
+        // Subtle lane accent tint & active playing lane flash
         if (!isInactive) {
-          this.ctx.fillStyle = lane.color + '0d';
+          const isPlayingNow = this.activePlayingLaneIds.has(lane.id);
+          this.ctx.fillStyle = isPlayingNow ? lane.color + '2c' : lane.color + '0d';
           this.ctx.fillRect(0, y, width, this.laneHeight);
+
+          if (isPlayingNow) {
+            this.ctx.fillStyle = lane.color;
+            this.ctx.fillRect(0, y, 3, this.laneHeight);
+          }
         }
 
         // Lane bottom divider
@@ -737,8 +775,8 @@ export class Sequencer {
       const isInactive = lane.muted || (hasSolo && !lane.solo);
 
       const x = Math.round(this.msToPx(tr.time) - triggerW / 2);
-      const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
-      const h = this.laneHeight - 12;
+      const h = Math.max(16, this.laneHeight - (this.laneHeight < 36 ? 4 : 12));
+      const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + Math.round((this.laneHeight - h) / 2);
 
       // Vertical culling: skip triggers on lanes scrolled off-screen
       if (y + h < this.rulerHeight || y > this.canvas.height) continue;
@@ -1169,8 +1207,8 @@ export class Sequencer {
         const lIdx = laneIndexMap.get(tr.laneId);
         if (lIdx === undefined) continue;
 
-        const noteTop = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
-        const noteBottom = noteTop + this.laneHeight - 12;
+        const noteTop = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 2;
+        const noteBottom = noteTop + this.laneHeight - 4;
 
         if (noteBottom >= minY && noteTop <= maxY) {
           this.selectedTriggerIds.add(tr.id);

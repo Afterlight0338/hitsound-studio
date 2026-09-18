@@ -6,6 +6,7 @@ import { generateHitsoundBeatmap } from '../osu/hitsoundGenerator';
 import { importHitsoundsFromBeatmap } from '../osu/hitsoundImporter';
 import { parseOsu } from '../osu/parser';
 import type {
+  AdditionType,
   CopierOptions,
   Lane,
   OsuBeatmap,
@@ -40,6 +41,7 @@ export class App {
   // Clipboard & Toast
   private clipboard: { laneId: string; relTime: number; volume?: number }[] = [];
   private toastTimeout: number | null = null;
+  private isCompactLanes: boolean = false;
 
   constructor() {
     this.audioEngine = new AudioEngine();
@@ -145,7 +147,6 @@ export class App {
             <button id="btn-stop" class="btn btn-secondary" title="Return to start (Home)">⏮</button>
             <div class="time-display" id="time-display">00:00.000</div>
             <div class="bpm-display" id="bpm-display" title="Active BPM at playhead">120 BPM</div>
-            <div class="kiai-badge" id="kiai-badge" style="display: none;" title="Kiai Time active">🔥 KIAI</div>
 
             <div class="transport-group">
               <label>Rate:</label>
@@ -178,8 +179,10 @@ export class App {
             <div class="transport-group volumes">
               <span>🎵</span>
               <input type="range" id="vol-song" min="0" max="100" value="80" title="Song Volume" class="range-slider mini">
-              <span>🥁</span>
+              <input type="number" id="num-vol-song" min="0" max="100" value="80" class="vol-num-input" title="Song Volume %"><span class="pct-sign">%</span>
+              <span>🔔</span>
               <input type="range" id="vol-hs" min="0" max="100" value="90" title="Hitsound Volume" class="range-slider mini">
+              <input type="number" id="num-vol-hs" min="0" max="100" value="90" class="vol-num-input" title="Hitsound Volume %"><span class="pct-sign">%</span>
             </div>
           </div>
 
@@ -209,7 +212,19 @@ export class App {
               <div class="rack-header-container">
                 <div class="rack-top-line">
                   <span id="rack-lanes-title" class="rack-title">LANES (${this.lanes.length})</span>
-                  <button id="btn-add-lane" class="btn btn-sm btn-primary">+ Add Lane</button>
+                  <div class="rack-top-actions">
+                    <button id="btn-toggle-compact" class="btn btn-sm btn-outline" title="Toggle compact lanes mode (see more lanes)">⊟ Compact</button>
+                    <div class="add-lane-btn-group">
+                      <button id="btn-add-lane" class="btn btn-sm btn-primary">+ Add Lane</button>
+                      <button id="btn-add-lane-menu" class="btn btn-sm btn-primary btn-arrow" title="Add specific addition lane">▾</button>
+                      <div id="add-lane-menu" class="add-lane-menu" style="display: none;">
+                        <div class="add-lane-menu-item" data-add="Clap">👏 Add Soft Clap</div>
+                        <div class="add-lane-menu-item" data-add="Whistle">🎵 Add Soft Whistle</div>
+                        <div class="add-lane-menu-item" data-add="Finish">💥 Add Soft Finish</div>
+                        <div class="add-lane-menu-item" data-add="None">🥁 Add HitNormal</div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div class="rack-sub-line">
                   <label style="font-size:0.75rem; color:var(--text-muted)">Ghost:</label>
@@ -229,7 +244,7 @@ export class App {
             <div class="sequencer-container">
               <canvas id="sequencer-canvas"></canvas>
               <div class="hint-bar">
-                💡 <strong>Click</strong>: Place | <strong>Drag</strong>: Select | <strong>Ctrl+Drag</strong>: Paint | <strong>Right-Click</strong>: Erase | <strong>Ctrl+Z</strong>: Undo | <strong>C / V</strong>: Copy/Paste | <strong>Del / X</strong>: Delete
+                💡 <strong>Click</strong>: Place | <strong>Drag</strong>: Select | <strong>W/E/R</strong>: Toggle Additions | <strong>Drop audio</strong>: Load Sample | <strong>Ctrl+Z</strong>: Undo | <strong>C / V</strong>: Copy/Paste
               </div>
             </div>
           </div>
@@ -412,12 +427,40 @@ export class App {
         const cur = this.audioEngine.getCurrentTimeMs();
         this.sequencer.setTime(cur, true);
         this.updateTimeDisplay(cur);
+
+        // Active lane luminous flash during playback
+        const activeIds = this.sequencer.getActiveLaneIds(cur, 80);
+        this.sequencer.setActivePlayingLanes(activeIds);
+        this.updateActiveLaneDomIndicators(activeIds);
+
         this.animFrameId = requestAnimationFrame(tick);
       } else {
         this.animFrameId = null;
+        this.sequencer.setActivePlayingLanes(new Set());
+        this.updateActiveLaneDomIndicators(new Set());
       }
     };
     this.animFrameId = requestAnimationFrame(tick);
+  }
+
+  private flashLane(laneId: string) {
+    const el = document.querySelector(`.lane-item[data-lane-id="${laneId}"]`);
+    if (el) {
+      el.classList.add('is-playing');
+      setTimeout(() => el.classList.remove('is-playing'), 140);
+    }
+  }
+
+  private updateActiveLaneDomIndicators(activeIds: Set<string>) {
+    const items = document.querySelectorAll<HTMLElement>('.lane-item');
+    items.forEach((item) => {
+      const laneId = item.getAttribute('data-lane-id');
+      if (laneId && activeIds.has(laneId)) {
+        item.classList.add('is-playing');
+      } else {
+        item.classList.remove('is-playing');
+      }
+    });
   }
 
   private updateSequencerData() {
@@ -445,9 +488,13 @@ export class App {
       }
       if (isPlaying) {
         this.startPlaybackLoop();
-      } else if (this.animFrameId !== null) {
-        cancelAnimationFrame(this.animFrameId);
-        this.animFrameId = null;
+      } else {
+        if (this.animFrameId !== null) {
+          cancelAnimationFrame(this.animFrameId);
+          this.animFrameId = null;
+        }
+        this.sequencer.setActivePlayingLanes(new Set());
+        this.updateActiveLaneDomIndicators(new Set());
       }
     };
   }
@@ -472,12 +519,6 @@ export class App {
       if (bpmDisp) {
         const bpm = this.sequencer.getActiveBpm(ms);
         bpmDisp.textContent = `${bpm} BPM`;
-      }
-
-      const kiaiBadge = document.getElementById('kiai-badge');
-      if (kiaiBadge) {
-        const isKiai = this.sequencer.isKiaiAtTime(ms);
-        kiaiBadge.style.display = isKiai ? 'inline-block' : 'none';
       }
     }
   }
@@ -511,22 +552,81 @@ export class App {
       this.sequencer.setZoom(zoom);
     });
 
-    // Volumes
-    document.getElementById('vol-song')?.addEventListener('input', (e) => {
-      const val = parseInt((e.target as HTMLInputElement).value, 10) / 100;
-      this.audioEngine.setSongVolume(val);
+    // Volumes: slider <-> numeric % input sync
+    const volSongSlider = document.getElementById('vol-song') as HTMLInputElement;
+    const numVolSong = document.getElementById('num-vol-song') as HTMLInputElement;
+    const volHsSlider = document.getElementById('vol-hs') as HTMLInputElement;
+    const numVolHs = document.getElementById('num-vol-hs') as HTMLInputElement;
+
+    volSongSlider?.addEventListener('input', () => {
+      const val = parseInt(volSongSlider.value, 10) || 0;
+      if (numVolSong) numVolSong.value = String(val);
+      this.audioEngine.setSongVolume(val / 100);
     });
-    document.getElementById('vol-hs')?.addEventListener('input', (e) => {
-      const val = parseInt((e.target as HTMLInputElement).value, 10) / 100;
-      this.audioEngine.setHitsoundVolume(val);
+    numVolSong?.addEventListener('input', () => {
+      let val = parseInt(numVolSong.value, 10);
+      if (isNaN(val)) val = 0;
+      val = Math.max(0, Math.min(100, val));
+      if (volSongSlider) volSongSlider.value = String(val);
+      this.audioEngine.setSongVolume(val / 100);
+    });
+    numVolSong?.addEventListener('blur', () => {
+      numVolSong.value = volSongSlider ? volSongSlider.value : '80';
+    });
+
+    volHsSlider?.addEventListener('input', () => {
+      const val = parseInt(volHsSlider.value, 10) || 0;
+      if (numVolHs) numVolHs.value = String(val);
+      this.audioEngine.setHitsoundVolume(val / 100);
+    });
+    numVolHs?.addEventListener('input', () => {
+      let val = parseInt(numVolHs.value, 10);
+      if (isNaN(val)) val = 0;
+      val = Math.max(0, Math.min(100, val));
+      if (volHsSlider) volHsSlider.value = String(val);
+      this.audioEngine.setHitsoundVolume(val / 100);
+    });
+    numVolHs?.addEventListener('blur', () => {
+      numVolHs.value = volHsSlider ? volHsSlider.value : '90';
     });
 
     // Tabs
     document.getElementById('tab-studio')?.addEventListener('click', () => this.switchTab('studio'));
     document.getElementById('tab-copier')?.addEventListener('click', () => this.switchTab('copier'));
 
-    // Add Lane
+    // Toggle Compact Lanes Mode
+    document.getElementById('btn-toggle-compact')?.addEventListener('click', () => {
+      this.toggleCompactLanes();
+    });
+
+    // Add Lane Button and Dropdown Menu
     document.getElementById('btn-add-lane')?.addEventListener('click', () => this.addNewLane());
+
+    const btnMenu = document.getElementById('btn-add-lane-menu');
+    const addMenu = document.getElementById('add-lane-menu');
+    btnMenu?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (addMenu) {
+        addMenu.style.display = addMenu.style.display === 'none' ? 'block' : 'none';
+      }
+    });
+
+    document.querySelectorAll<HTMLElement>('.add-lane-menu-item').forEach((item) => {
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const add = item.getAttribute('data-add') as any;
+        if (add) {
+          this.addNewLaneWithAddition(add);
+        }
+        if (addMenu) addMenu.style.display = 'none';
+      });
+    });
+
+    document.addEventListener('click', (e) => {
+      if (addMenu && !addMenu.contains(e.target as Node) && e.target !== btnMenu) {
+        addMenu.style.display = 'none';
+      }
+    });
 
     // File Input
     const fileInput = document.getElementById('file-input') as HTMLInputElement;
@@ -599,6 +699,10 @@ export class App {
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => {
       e.preventDefault();
+      // If dropped directly onto a lane item, let the lane handle the sample file
+      if ((e.target as HTMLElement)?.closest('.lane-item')) {
+        return;
+      }
       if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
         this.handleFiles(Array.from(e.dataTransfer.files));
       }
@@ -658,6 +762,25 @@ export class App {
         btnGhost?.classList.toggle('active', this.sequencer.showGhostNotes);
         this.sequencer.render();
         return;
+      }
+
+      // Toggle Additions on Selected Notes: W (Whistle), E (Finish), R (Clap)
+      if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.key === 'w' || e.key === 'W') {
+          e.preventDefault();
+          this.toggleAdditionOnSelected('Whistle');
+          return;
+        }
+        if (e.key === 'e' || e.key === 'E') {
+          e.preventDefault();
+          this.toggleAdditionOnSelected('Finish');
+          return;
+        }
+        if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          this.toggleAdditionOnSelected('Clap');
+          return;
+        }
       }
 
       // Undo: Ctrl+Z (without Shift)
@@ -897,6 +1020,113 @@ export class App {
     }, 1400);
   }
 
+  public toggleCompactLanes() {
+    this.isCompactLanes = !this.isCompactLanes;
+    const rack = document.querySelector('.channel-rack');
+    const btn = document.getElementById('btn-toggle-compact');
+    if (rack) {
+      rack.classList.toggle('is-compact', this.isCompactLanes);
+    }
+    if (btn) {
+      btn.textContent = this.isCompactLanes ? '⊞ Expand' : '⊟ Compact';
+      btn.title = this.isCompactLanes ? 'Expand lanes to show all controls' : 'Compact lanes to see more tracks';
+    }
+    this.sequencer.setLaneHeight(this.isCompactLanes ? 28 : 58);
+  }
+
+  public addNewLaneWithAddition(addition: AdditionType) {
+    const colors: Record<AdditionType, string> = {
+      Whistle: '#00e5ff',
+      Clap: '#ff4081',
+      Finish: '#ffc400',
+      None: '#76ff03',
+    };
+    const names: Record<AdditionType, string> = {
+      Whistle: 'Soft Whistle',
+      Clap: 'Soft Clap',
+      Finish: 'Soft Finish',
+      None: 'Soft Normal',
+    };
+
+    const count = this.lanes.filter((l) => l.addition === addition).length + 1;
+    const newLane: Lane = {
+      id: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `${names[addition]} ${count}`,
+      sampleSet: 'Soft',
+      addition,
+      additionSet: 'Auto',
+      customIndex: 0,
+      volume: 85,
+      color: colors[addition] || '#ff4081',
+      muted: false,
+      solo: false,
+    };
+
+    this.lanes.push(newLane);
+    this.renderLanesList();
+    this.updateSequencerData();
+    this.showToast(`Added lane: ${newLane.name}`);
+  }
+
+  public toggleAdditionOnSelected(addition: 'Whistle' | 'Finish' | 'Clap') {
+    if (this.sequencer.selectedTriggerIds.size === 0) {
+      this.showToast(`Select notes first to toggle ${addition} (W: Whistle, E: Finish, R: Clap)`);
+      return;
+    }
+
+    // Find or create a target lane with this addition
+    let targetLane = this.lanes.find((l) => l.addition === addition && !l.muted);
+    if (!targetLane) {
+      targetLane = this.lanes.find((l) => l.addition === addition);
+    }
+    if (!targetLane) {
+      this.addNewLaneWithAddition(addition);
+      targetLane = this.lanes[this.lanes.length - 1];
+    }
+
+    this.pushHistorySnapshot();
+
+    const selectedTriggers = this.triggers.filter((t) => this.sequencer.selectedTriggerIds.has(t.id));
+    const timestamps = Array.from(new Set(selectedTriggers.map((t) => t.time)));
+
+    // Check if all selected timestamps already have this addition on targetLane
+    const existingOnTarget = this.triggers.filter((t) => t.laneId === targetLane!.id);
+    const existingTimes = new Set(existingOnTarget.map((t) => t.time));
+
+    const allHaveIt = timestamps.every((time) => existingTimes.has(time));
+
+    let addedCount = 0;
+    let removedCount = 0;
+
+    if (allHaveIt) {
+      // Toggle off: remove triggers on targetLane at these timestamps
+      const removeTimeSet = new Set(timestamps);
+      this.triggers = this.triggers.filter((t) => !(t.laneId === targetLane!.id && removeTimeSet.has(t.time)));
+      removedCount = timestamps.length;
+    } else {
+      // Toggle on: add triggers on targetLane for missing timestamps
+      for (const time of timestamps) {
+        if (!existingTimes.has(time)) {
+          const newTr: Trigger = {
+            id: `tr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            laneId: targetLane.id,
+            time,
+          };
+          this.triggers.push(newTr);
+          this.sequencer.selectedTriggerIds.add(newTr.id);
+          addedCount++;
+        }
+      }
+    }
+
+    this.updateSequencerData();
+    if (allHaveIt) {
+      this.showToast(`Removed ${addition} from ${removedCount} note${removedCount > 1 ? 's' : ''}`);
+    } else {
+      this.showToast(`Added ${addition} to ${addedCount} note${addedCount > 1 ? 's' : ''}`);
+    }
+  }
+
   // --- Dynamic Lanes Management ---
 
   public addNewLane(presetName?: string) {
@@ -948,11 +1178,19 @@ export class App {
       const isMuted = lane.muted;
       const isSoloInactive = hasSolo && !lane.solo;
       el.className = `lane-item${isMuted ? ' is-muted' : ''}${isSoloInactive ? ' is-inactive' : ''}`;
+      el.setAttribute('data-lane-id', lane.id);
       el.style.borderLeftColor = lane.color;
+
+      const hasCustomSample = Boolean(lane.audioBuffer || lane.customSampleName);
+      const customSampleBadge = hasCustomSample ? `<span class="badge-custom-sample" title="Custom sample loaded">SAMPLE</span>` : '';
 
       el.innerHTML = `
         <div class="lane-top-row">
-          <input type="text" class="lane-name-input" value="${lane.name}" title="Rename lane">
+          <div class="lane-name-wrapper">
+            <span class="lane-activity-led" title="Active voice indicator"></span>
+            <input type="text" class="lane-name-input" value="${lane.name}" title="Rename lane">
+            ${customSampleBadge}
+          </div>
           <div class="lane-btns">
             <button class="btn-mute ${lane.muted ? 'active' : ''}" title="Mute lane">MUTE</button>
             <button class="btn-solo ${lane.solo ? 'active' : ''}" title="Solo lane">SOLO</button>
@@ -962,13 +1200,13 @@ export class App {
         </div>
 
         <div class="lane-controls-row">
-          <select class="lane-sampleset dropdown mini">
+          <select class="lane-sampleset dropdown mini" title="SampleSet">
             <option value="Soft" ${lane.sampleSet === 'Soft' ? 'selected' : ''}>Soft</option>
             <option value="Normal" ${lane.sampleSet === 'Normal' ? 'selected' : ''}>Normal</option>
             <option value="Drum" ${lane.sampleSet === 'Drum' ? 'selected' : ''}>Drum</option>
           </select>
 
-          <select class="lane-addition dropdown mini">
+          <select class="lane-addition dropdown mini" title="Addition">
             <option value="None" ${lane.addition === 'None' ? 'selected' : ''}>None</option>
             <option value="Clap" ${lane.addition === 'Clap' ? 'selected' : ''}>Clap</option>
             <option value="Whistle" ${lane.addition === 'Whistle' ? 'selected' : ''}>Whistle</option>
@@ -980,12 +1218,60 @@ export class App {
             <input type="number" class="lane-custom-idx" min="0" max="99" value="${lane.customIndex}">
           </div>
 
-          <div class="lane-vol-group" title="Lane volume: ${lane.volume}%">
-            <span>Vol</span>
-            <input type="range" class="lane-volume range-slider mini" min="0" max="100" value="${lane.volume}">
+          <div class="lane-vol-group" title="Lane volume percentage">
+            <span class="vol-label">Vol</span>
+            <input type="number" class="lane-volume-input" min="0" max="100" value="${lane.volume}">
+            <span class="pct-sign">%</span>
           </div>
         </div>
       `;
+
+      // Drag and drop audio sample directly onto this lane!
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        el.classList.add('drag-over');
+      });
+
+      el.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.remove('drag-over');
+      });
+
+      el.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.remove('drag-over');
+
+        const files = e.dataTransfer?.files;
+        if (!files || files.length === 0) return;
+
+        const file = Array.from(files).find((f) => /\.(wav|ogg|mp3)$/i.test(f.name));
+        if (!file) {
+          this.showToast('Please drop a valid audio sample (.wav, .ogg, or .mp3)');
+          return;
+        }
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const buffer = await this.audioEngine.decodeSampleAudio(arrayBuffer);
+          lane.audioBuffer = buffer;
+          lane.customSampleName = file.name;
+          if (lane.name.startsWith('Lane ') || lane.name.startsWith('Soft ') || lane.name.startsWith('Normal ') || lane.name.startsWith('Drum ')) {
+            lane.name = file.name.replace(/\.[^/.]+$/, '');
+          }
+          this.renderLanesList();
+          this.updateSequencerData();
+          this.audioEngine.playSingleSample(lane);
+          this.flashLane(lane.id);
+          this.showToast(`🎵 Loaded "${file.name}" to lane "${lane.name}"`);
+        } catch (err) {
+          console.error('Failed to decode dropped sample:', err);
+          this.showToast(`❌ Could not decode audio: ${file.name}`);
+        }
+      });
 
       // Event bindings for this lane
       const nameInput = el.querySelector('.lane-name-input') as HTMLInputElement;
@@ -1018,6 +1304,8 @@ export class App {
         const played = this.audioEngine.playSingleSample(lane);
         if (!played) {
           this.showToast(`No sample file loaded for "${lane.name}"`);
+        } else {
+          this.flashLane(lane.id);
         }
       });
 
@@ -1044,10 +1332,16 @@ export class App {
         this.updateSequencerData();
       });
 
-      const volSlider = el.querySelector('.lane-volume') as HTMLInputElement;
-      volSlider.addEventListener('input', () => {
-        lane.volume = parseInt(volSlider.value, 10) || 0;
+      const volInput = el.querySelector('.lane-volume-input') as HTMLInputElement;
+      volInput.addEventListener('input', () => {
+        let val = parseInt(volInput.value, 10);
+        if (isNaN(val)) val = 0;
+        val = Math.max(0, Math.min(100, val));
+        lane.volume = val;
         this.updateSequencerData();
+      });
+      volInput.addEventListener('blur', () => {
+        volInput.value = String(lane.volume);
       });
 
       container.appendChild(el);

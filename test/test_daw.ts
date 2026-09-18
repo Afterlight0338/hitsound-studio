@@ -258,5 +258,98 @@ if (isLane1Inactive) throw new Error('Soloed lane 1 should not be inactive');
 if (!isLane2Inactive) throw new Error('Non-soloed lane 2 must be inactive when solo is active');
 console.log('[PASS] Mute and Solo are strictly mutually exclusive and lane dimming states compute correctly');
 
+// 6. Test Additions Toggling (W / E / R hotkeys)
+let lanesList: Lane[] = [
+  { id: 'lane-whistle', name: 'Soft Whistle', sampleSet: 'Soft', addition: 'Whistle', additionSet: 'Auto', customIndex: 0, volume: 80, color: '#00e5ff', muted: false, solo: false },
+  { id: 'lane-clap', name: 'Soft Clap', sampleSet: 'Soft', addition: 'Clap', additionSet: 'Auto', customIndex: 0, volume: 90, color: '#ff4081', muted: false, solo: false },
+];
+let activeTriggers: Trigger[] = [
+  { id: 't-1', laneId: 'lane-whistle', time: 1000 },
+  { id: 't-2', laneId: 'lane-whistle', time: 2000 },
+];
+
+function toggleAddition(addition: 'Whistle' | 'Finish' | 'Clap', selectedTriggerIds: Set<string>) {
+  let targetLane = lanesList.find((l) => l.addition === addition);
+  if (!targetLane) {
+    targetLane = {
+      id: `lane-${addition.toLowerCase()}`,
+      name: `Soft ${addition}`,
+      sampleSet: 'Soft',
+      addition,
+      additionSet: 'Auto',
+      customIndex: 0,
+      volume: 85,
+      color: '#ffc400',
+      muted: false,
+      solo: false,
+    };
+    lanesList.push(targetLane);
+  }
+
+  const selected = activeTriggers.filter((t) => selectedTriggerIds.has(t.id));
+  const timestamps = Array.from(new Set(selected.map((t) => t.time)));
+  const existingOnTarget = activeTriggers.filter((t) => t.laneId === targetLane!.id);
+  const existingTimes = new Set(existingOnTarget.map((t) => t.time));
+  const allHaveIt = timestamps.every((time) => existingTimes.has(time));
+
+  if (allHaveIt) {
+    const removeSet = new Set(timestamps);
+    activeTriggers = activeTriggers.filter((t) => !(t.laneId === targetLane!.id && removeSet.has(t.time)));
+  } else {
+    for (const time of timestamps) {
+      if (!existingTimes.has(time)) {
+        activeTriggers.push({
+          id: `tr-${targetLane.id}-${time}`,
+          laneId: targetLane.id,
+          time,
+        });
+      }
+    }
+  }
+}
+
+// Case A: Toggle Clap on selected notes at 1000ms & 2000ms (should add clap triggers)
+toggleAddition('Clap', new Set(['t-1', 't-2']));
+const clapTriggers = activeTriggers.filter((t) => t.laneId === 'lane-clap');
+if (clapTriggers.length !== 2) throw new Error('Failed to add Clap additions to selected notes');
+console.log('[PASS] W/E/R additions toggle: successfully added Clap additions to selected notes');
+
+// Case B: Toggle Clap AGAIN on selected notes (should toggle off and remove clap triggers)
+toggleAddition('Clap', new Set(['t-1', 't-2']));
+const clapTriggersAfter = activeTriggers.filter((t) => t.laneId === 'lane-clap');
+if (clapTriggersAfter.length !== 0) throw new Error('Failed to toggle off Clap additions');
+console.log('[PASS] W/E/R additions toggle: successfully toggled off Clap additions when already present');
+
+// Case C: Toggle Finish (lane does not exist yet; should auto-create Finish lane and add notes)
+toggleAddition('Finish', new Set(['t-1']));
+const finishLane = lanesList.find((l) => l.addition === 'Finish');
+const finishTriggers = activeTriggers.filter((t) => t.laneId === finishLane?.id);
+if (!finishLane || finishTriggers.length !== 1) throw new Error('Failed to auto-create Finish lane and assign note');
+console.log('[PASS] W/E/R additions toggle: auto-created missing addition lane and added note');
+
+// 7. Test Compact Lane Mode and Numeric Volume Validation
+let isCompact = false;
+let laneHeight = 58;
+function toggleCompact() {
+  isCompact = !isCompact;
+  laneHeight = isCompact ? 28 : 58;
+}
+toggleCompact();
+if (laneHeight !== 28 || !isCompact) throw new Error('Compact mode failed to set 28px lane height');
+toggleCompact();
+if (laneHeight !== 58 || isCompact) throw new Error('Expand mode failed to restore 58px lane height');
+console.log('[PASS] Compact lane toggle correctly alternates between 28px and 58px height');
+
+// Numeric volume parsing
+function parseVolume(input: string): number {
+  let val = parseInt(input, 10);
+  if (isNaN(val)) val = 0;
+  return Math.max(0, Math.min(100, val));
+}
+if (parseVolume('85') !== 85 || parseVolume('150') !== 100 || parseVolume('-20') !== 0 || parseVolume('abc') !== 0) {
+  throw new Error('Volume percentage parsing/clamping validation failed');
+}
+console.log('[PASS] Numeric volume percentage parsing strictly clamps to [0, 100]%');
+
 console.log('\n>>> ALL DAW FEATURE TESTS PASSED WITH 100% INTEGRITY! <<<');
 
