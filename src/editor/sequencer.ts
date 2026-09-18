@@ -9,6 +9,7 @@ export interface SequencerEvents {
   onScrollVertical: (scrollTop: number) => void;
   onZoomChange?: (newZoom: number) => void;
   onPushHistory?: () => void;
+  onMoveTriggers?: (movedTriggers: { id: string; laneId: string; time: number }[]) => void;
 }
 
 export class Sequencer {
@@ -28,10 +29,11 @@ export class Sequencer {
   // Exact Layout Dimensions matching the Left Channel Rack
   public zoomPxPerSec = 220; // Horizontal zoom
   public scrollLeftMs = 0; // Current view start in ms
-  public scrollTopPx = 0; // Vertical scroll
-  public laneHeight = 58; // Exactly matches HTML lane card height
-  public rulerHeight = 64; // Exactly matches left rack header height
-  public scrollbarHeight = 14; // Bottom overview scrollbar height
+  public scrollTopPx = 0; // Vertical scroll offset
+  public readonly rulerHeight = 64; // Strictly 64px to match rack header
+  public laneHeight = 58; // Default 58px, compact 28px
+  public readonly scrollbarHeight = 14;
+
   public currentTimeMs = 0;
   public activeSnapDivisor = 4; // 1/4 default
   public followPlayhead = true;
@@ -52,6 +54,20 @@ export class Sequencer {
   private panStartScrollTop = 0;
   private selectionStart = { x: 0, y: 0 };
   private selectionCurrent = { x: 0, y: 0 };
+
+  // Note Dragging State
+  private dragNotesStart: {
+    anchorId: string;
+    anchorOriginalTime: number;
+    startLaneIdx: number;
+    startMouseX: number;
+    startMouseY: number;
+    startRawTime: number;
+    originalNotes: Map<string, { laneId: string; time: number }>;
+    hasDragged: boolean;
+    clickedExistingWasSelected: boolean;
+  } | null = null;
+  private draggedNotesPreview: Map<string, { laneId: string; time: number }> | null = null;
 
   private pendingClickNote: { lane: Lane; time: number } | null = null;
   private mouseDownPos = { x: 0, y: 0 };
@@ -765,16 +781,41 @@ export class Sequencer {
     // Dynamic width with strict margin so notes never overlap in dense streams
     const triggerW = Math.max(6, Math.min(26, this.zoomPxPerSec * 0.035));
 
-    for (const tr of this.triggers) {
-      if (tr.time < viewStartMs - 500 || tr.time > viewEndMs + 500) continue;
+    // 1. If dragging notes, render ghost dashed outlines at their original positions
+    if (this.draggedNotesPreview && this.dragNotesStart) {
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.38;
+      for (const [_, orig] of this.dragNotesStart.originalNotes) {
+        const lIdx = laneIndexMap.get(orig.laneId);
+        if (lIdx === undefined) continue;
+        const lane = this.lanes[lIdx];
+        const x = Math.round(this.msToPx(orig.time) - triggerW / 2);
+        const h = Math.max(16, this.laneHeight - (this.laneHeight < 36 ? 4 : 12));
+        const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + Math.round((this.laneHeight - h) / 2);
 
-      const lIdx = laneIndexMap.get(tr.laneId);
+        this.ctx.strokeStyle = lane.color;
+        this.ctx.setLineDash([3, 3]);
+        this.ctx.lineWidth = 1.8;
+        this.ctx.strokeRect(x, y, triggerW, h);
+      }
+      this.ctx.restore();
+    }
+
+    // 2. Render triggers
+    for (const tr of this.triggers) {
+      const preview = this.draggedNotesPreview?.get(tr.id);
+      const effectiveLaneId = preview ? preview.laneId : tr.laneId;
+      const effectiveTime = preview ? preview.time : tr.time;
+
+      if (effectiveTime < viewStartMs - 500 || effectiveTime > viewEndMs + 500) continue;
+
+      const lIdx = laneIndexMap.get(effectiveLaneId);
       if (lIdx === undefined) continue;
 
       const lane = this.lanes[lIdx];
       const isInactive = lane.muted || (hasSolo && !lane.solo);
 
-      const x = Math.round(this.msToPx(tr.time) - triggerW / 2);
+      const x = Math.round(this.msToPx(effectiveTime) - triggerW / 2);
       const h = Math.max(16, this.laneHeight - (this.laneHeight < 36 ? 4 : 12));
       const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + Math.round((this.laneHeight - h) / 2);
 
@@ -782,6 +823,7 @@ export class Sequencer {
       if (y + h < this.rulerHeight || y > this.canvas.height) continue;
 
       const isSelected = this.selectedTriggerIds.has(tr.id);
+      const isBeingDragged = Boolean(preview);
 
       this.ctx.save();
       if (isInactive) {
@@ -794,8 +836,16 @@ export class Sequencer {
       this.ctx.roundRect(x, y, triggerW, h, 4);
       this.ctx.fill();
 
-      // Border & Selection Highlight
-      if (isSelected) {
+      // Border & Selection / Drag Highlight
+      if (isBeingDragged) {
+        // High visibility cyan glow for live dragged note
+        this.ctx.strokeStyle = '#00e5ff';
+        this.ctx.lineWidth = 2.5;
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = 'rgba(0, 229, 255, 0.45)';
+        this.ctx.fillRect(x + 2, y + 2, triggerW - 4, h - 4);
+      } else if (isSelected) {
         this.ctx.strokeStyle = '#fffb00';
         this.ctx.lineWidth = 2.5;
         this.ctx.stroke();
@@ -905,7 +955,7 @@ export class Sequencer {
   private setupEvents() {
     this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
     window.addEventListener('mousemove', (e) => this.onMouseMove(e));
-    window.addEventListener('mouseup', () => this.onMouseUp());
+    window.addEventListener('mouseup', (e) => this.onMouseUp(e));
 
     this.canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -987,11 +1037,19 @@ export class Sequencer {
     const rawTime = this.pxToMs(clickX);
     const snappedTime = this.snapTimeToGrid(rawTime);
 
-    // Tolerance for clicking on an existing trigger (16px)
+    // Tolerance for clicking on an existing trigger (16px) - find closest note
     const toleranceMs = (16 / this.zoomPxPerSec) * 1000;
-    const existing = this.triggers.find(
-      (tr) => tr.laneId === lane.id && Math.abs(tr.time - rawTime) <= toleranceMs
-    );
+    let existing: Trigger | null = null;
+    let minDiff = Infinity;
+    for (const tr of this.triggers) {
+      if (tr.laneId === lane.id) {
+        const diff = Math.abs(tr.time - rawTime);
+        if (diff <= toleranceMs && diff < minDiff) {
+          minDiff = diff;
+          existing = tr;
+        }
+      }
+    }
 
     // Right Click -> Delete note or start drag-erase mode
     if (e.button === 2) {
@@ -1019,20 +1077,46 @@ export class Sequencer {
     // Left Click
     if (e.button === 0) {
       if (existing) {
+        const wasAlreadySelected = this.selectedTriggerIds.has(existing.id);
+
         if (e.shiftKey) {
           // Toggle selection
-          if (this.selectedTriggerIds.has(existing.id)) {
+          if (wasAlreadySelected) {
             this.selectedTriggerIds.delete(existing.id);
           } else {
             this.selectedTriggerIds.add(existing.id);
           }
         } else {
-          // Keep selection if already part of group, otherwise select only this note
-          if (!this.selectedTriggerIds.has(existing.id)) {
+          // If not already selected, select only this note
+          if (!wasAlreadySelected) {
             this.selectedTriggerIds.clear();
             this.selectedTriggerIds.add(existing.id);
           }
+          // If already selected, preserve current selection in case user drags group!
         }
+
+        // Prepare note drag state
+        if (this.selectedTriggerIds.has(existing.id)) {
+          const origMap = new Map<string, { laneId: string; time: number }>();
+          for (const tr of this.triggers) {
+            if (this.selectedTriggerIds.has(tr.id)) {
+              origMap.set(tr.id, { laneId: tr.laneId, time: tr.time });
+            }
+          }
+
+          this.dragNotesStart = {
+            anchorId: existing.id,
+            anchorOriginalTime: existing.time,
+            startLaneIdx: laneIdx,
+            startMouseX: clickX,
+            startMouseY: clickY,
+            startRawTime: rawTime,
+            originalNotes: origMap,
+            hasDragged: false,
+            clickedExistingWasSelected: wasAlreadySelected,
+          };
+        }
+
         this.events.onPreviewSample(lane);
         this.render();
         return;
@@ -1084,6 +1168,72 @@ export class Sequencer {
 
     const gridY = mouseY - this.rulerHeight + this.scrollTopPx;
 
+    // Note dragging mode
+    if (this.dragNotesStart) {
+      const dist = Math.hypot(mouseX - this.dragNotesStart.startMouseX, mouseY - this.dragNotesStart.startMouseY);
+      if (!this.dragNotesStart.hasDragged) {
+        if (dist >= 4) {
+          this.dragNotesStart.hasDragged = true;
+          this.canvas.style.cursor = 'grabbing';
+        }
+      }
+
+      if (this.dragNotesStart.hasDragged) {
+        // Auto-scroll when dragging near viewport edges
+        if (mouseX > rect.width - 25) {
+          this.scrollLeftMs += (25 / this.zoomPxPerSec) * 1000;
+        } else if (mouseX < 25 && this.scrollLeftMs > 0) {
+          this.scrollLeftMs = Math.max(0, this.scrollLeftMs - (25 / this.zoomPxPerSec) * 1000);
+        }
+
+        const currentRawTime = this.pxToMs(mouseX);
+        const rawDeltaMs = currentRawTime - this.dragNotesStart.startRawTime;
+
+        // Anchor-based grid snapping
+        const targetAnchorRawTime = this.dragNotesStart.anchorOriginalTime + rawDeltaMs;
+        const targetAnchorSnappedTime = Math.max(0, this.snapTimeToGrid(targetAnchorRawTime));
+        let effectiveDeltaMs = targetAnchorSnappedTime - this.dragNotesStart.anchorOriginalTime;
+
+        // Ensure no note goes before 0ms
+        for (const [_, orig] of this.dragNotesStart.originalNotes) {
+          if (orig.time + effectiveDeltaMs < 0) {
+            effectiveDeltaMs = -orig.time;
+          }
+        }
+
+        // Lane vertical offset
+        const currentLaneIdx = Math.floor(gridY / this.laneHeight);
+        let laneDelta = currentLaneIdx - this.dragNotesStart.startLaneIdx;
+
+        // Clamp lane delta so all notes stay within bounds [0, lanes.length - 1]
+        const laneIdToIndex = new Map<string, number>();
+        this.lanes.forEach((l, idx) => laneIdToIndex.set(l.id, idx));
+
+        for (const [_, orig] of this.dragNotesStart.originalNotes) {
+          const origIdx = laneIdToIndex.get(orig.laneId) ?? 0;
+          if (origIdx + laneDelta < 0) {
+            laneDelta = -origIdx;
+          } else if (origIdx + laneDelta >= this.lanes.length) {
+            laneDelta = this.lanes.length - 1 - origIdx;
+          }
+        }
+
+        // Generate preview
+        const previewMoves = new Map<string, { laneId: string; time: number }>();
+        for (const [id, orig] of this.dragNotesStart.originalNotes) {
+          const origIdx = laneIdToIndex.get(orig.laneId) ?? 0;
+          const targetLaneIdx = Math.max(0, Math.min(this.lanes.length - 1, origIdx + laneDelta));
+          const targetLaneId = this.lanes[targetLaneIdx].id;
+          const targetTime = Math.max(0, Math.round(orig.time + effectiveDeltaMs));
+          previewMoves.set(id, { laneId: targetLaneId, time: targetTime });
+        }
+
+        this.draggedNotesPreview = previewMoves;
+        this.render();
+        return;
+      }
+    }
+
     // Paint mode: continuously place triggers as mouse drags
     if (this.isPainting) {
       this.paintTriggerAt(mouseX, gridY);
@@ -1111,10 +1261,28 @@ export class Sequencer {
       this.selectionCurrent = { x: mouseX, y: mouseY };
       this.updateBoxSelection(e.shiftKey);
       this.render();
+      return;
+    }
+
+    // Cursor hover update
+    if (!this.isBoxSelecting && !this.isPainting && !this.isErasing && !this.isPanning && !this.isScrubbingRuler && !this.dragNotesStart) {
+      const hoverToleranceMs = (16 / this.zoomPxPerSec) * 1000;
+      const hoverLaneIdx = Math.floor(gridY / this.laneHeight);
+      let isHovering = false;
+
+      if (hoverLaneIdx >= 0 && hoverLaneIdx < this.lanes.length && mouseY > this.rulerHeight) {
+        const hoverLane = this.lanes[hoverLaneIdx];
+        const hoverRawTime = this.pxToMs(mouseX);
+        isHovering = this.triggers.some(
+          (tr) => tr.laneId === hoverLane.id && Math.abs(tr.time - hoverRawTime) <= hoverToleranceMs
+        );
+      }
+
+      this.canvas.style.cursor = isHovering ? 'grab' : '';
     }
   }
 
-  private onMouseUp() {
+  private onMouseUp(e?: MouseEvent) {
     this.isScrubbingRuler = false;
     this.isPainting = false;
     this.isErasing = false;
@@ -1124,6 +1292,47 @@ export class Sequencer {
     if (this.isPanning) {
       this.isPanning = false;
       this.canvas.style.cursor = '';
+    }
+
+    // Commit note drag if dragged
+    if (this.dragNotesStart) {
+      if (this.dragNotesStart.hasDragged && this.draggedNotesPreview) {
+        const moves: { id: string; laneId: string; time: number }[] = [];
+        let anyChanged = false;
+
+        for (const [id, target] of this.draggedNotesPreview) {
+          const orig = this.dragNotesStart.originalNotes.get(id);
+          if (orig && (orig.laneId !== target.laneId || orig.time !== target.time)) {
+            anyChanged = true;
+          }
+          moves.push({ id, laneId: target.laneId, time: target.time });
+        }
+
+        if (anyChanged) {
+          this.events.onPushHistory?.();
+          this.events.onMoveTriggers?.(moves);
+
+          // Preview sound of target lane if anchor moved to a different lane
+          const anchorMove = this.draggedNotesPreview.get(this.dragNotesStart.anchorId);
+          if (anchorMove) {
+            const targetLane = this.lanes.find((l) => l.id === anchorMove.laneId);
+            if (targetLane) {
+              this.events.onPreviewSample(targetLane);
+            }
+          }
+        }
+      } else if (!this.dragNotesStart.hasDragged) {
+        // Released without dragging: if clicked note was already part of a multi-note selection, single it out now (unless shift was held)
+        if (this.dragNotesStart.clickedExistingWasSelected && !e?.shiftKey) {
+          this.selectedTriggerIds.clear();
+          this.selectedTriggerIds.add(this.dragNotesStart.anchorId);
+        }
+      }
+
+      this.dragNotesStart = null;
+      this.draggedNotesPreview = null;
+      this.canvas.style.cursor = '';
+      this.render();
     }
 
     // If mouse released without dragging, place note

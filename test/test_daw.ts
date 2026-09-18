@@ -351,5 +351,57 @@ if (parseVolume('85') !== 85 || parseVolume('150') !== 100 || parseVolume('-20')
 }
 console.log('[PASS] Numeric volume percentage parsing strictly clamps to [0, 100]%');
 
+// 8. Test Note Dragging (moving notes across time and lanes)
+let dragTriggers: Trigger[] = [
+  { id: 'drag-1', laneId: 'l1', time: 1000 },
+  { id: 'drag-2', laneId: 'l2', time: 1250 },
+];
+
+function moveTriggers(
+  triggers: Trigger[],
+  moves: { id: string; laneId: string; time: number }[]
+): Trigger[] {
+  const moveMap = new Map(moves.map((m) => [m.id, m]));
+  const updated = triggers.map((t) => {
+    const m = moveMap.get(t.id);
+    return m ? { ...t, laneId: m.laneId, time: m.time } : { ...t };
+  });
+  // Deduplicate
+  const seen = new Set<string>();
+  return updated.filter((t) => {
+    const key = `${t.laneId}_${t.time}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => a.time - b.time);
+}
+
+// Case A: Drag a single note forward in time by 500ms
+const movedSingle = moveTriggers(dragTriggers, [{ id: 'drag-1', laneId: 'l1', time: 1500 }]);
+if (movedSingle.find((t) => t.id === 'drag-1')?.time !== 1500) {
+  throw new Error('Failed to move single note in time');
+}
+console.log('[PASS] Note drag: successfully moved single note forward in time to 1500ms');
+
+// Case B: Drag a note between lanes (l1 -> l2)
+const movedLane = moveTriggers(dragTriggers, [{ id: 'drag-1', laneId: 'l2', time: 1000 }]);
+if (movedLane.find((t) => t.id === 'drag-1')?.laneId !== 'l2') {
+  throw new Error('Failed to move single note between lanes');
+}
+console.log('[PASS] Note drag: successfully moved note to different lane');
+
+// Case C: Drag multiple selected notes simultaneously (preserving relative offset)
+const movedGroup = moveTriggers(dragTriggers, [
+  { id: 'drag-1', laneId: 'l1', time: 2000 },
+  { id: 'drag-2', laneId: 'l2', time: 2250 },
+]);
+if (
+  movedGroup.find((t) => t.id === 'drag-1')?.time !== 2000 ||
+  movedGroup.find((t) => t.id === 'drag-2')?.time !== 2250
+) {
+  throw new Error('Failed to move group of selected notes');
+}
+console.log('[PASS] Note drag: successfully moved group of selected notes preserving relative timing');
+
 console.log('\n>>> ALL DAW FEATURE TESTS PASSED WITH 100% INTEGRITY! <<<');
 

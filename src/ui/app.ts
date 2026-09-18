@@ -393,6 +393,9 @@ export class App {
       onPushHistory: () => {
         this.pushHistorySnapshot();
       },
+      onMoveTriggers: (moves) => {
+        this.moveTriggers(moves);
+      },
     });
 
     // Synchronize vertical scroll from left rack to canvas
@@ -993,6 +996,27 @@ export class App {
   public selectAll() {
     this.sequencer.selectAll();
     this.showToast(`Selected all ${this.triggers.length} notes`);
+  }
+
+  public moveTriggers(moves: { id: string; laneId: string; time: number }[]) {
+    const moveMap = new Map(moves.map((m) => [m.id, m]));
+    for (const tr of this.triggers) {
+      const m = moveMap.get(tr.id);
+      if (m) {
+        tr.laneId = m.laneId;
+        tr.time = m.time;
+      }
+    }
+    // Deduplicate in case notes land on exact same lane & time
+    const seen = new Set<string>();
+    this.triggers = this.triggers.filter((t) => {
+      const key = `${t.laneId}_${t.time}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    this.triggers.sort((a, b) => a.time - b.time);
+    this.updateSequencerData();
   }
 
   public showToast(message: string) {
