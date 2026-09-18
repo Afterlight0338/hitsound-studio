@@ -8,6 +8,7 @@ export interface SequencerEvents {
   onPreviewSample: (lane: Lane) => void;
   onScrollVertical: (scrollTop: number) => void;
   onZoomChange?: (newZoom: number) => void;
+  onPushHistory?: () => void;
 }
 
 export class Sequencer {
@@ -50,6 +51,9 @@ export class Sequencer {
   private selectionStart = { x: 0, y: 0 };
   private selectionCurrent = { x: 0, y: 0 };
 
+  private pendingClickNote: { lane: Lane; time: number } | null = null;
+  private mouseDownPos = { x: 0, y: 0 };
+  private initialSelection = new Set<string>();
   private lastPaintedCell: string | null = null;
   private events: SequencerEvents;
 
@@ -127,6 +131,19 @@ export class Sequencer {
     this.currentTimeMs = 0;
     this.scrollLeftMs = 0;
     this.scrollTopPx = 0;
+    this.selectedTriggerIds.clear();
+    this.render();
+  }
+
+  public selectAll() {
+    this.selectedTriggerIds.clear();
+    for (const tr of this.triggers) {
+      this.selectedTriggerIds.add(tr.id);
+    }
+    this.render();
+  }
+
+  public deselectAll() {
     this.selectedTriggerIds.clear();
     this.render();
   }
@@ -634,19 +651,12 @@ export class Sequencer {
     this.canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    // Shortcuts: Delete triggers, Zoom +/-, PageUp/PageDown
+    // Shortcuts: Zoom +/-, PageUp/PageDown
     window.addEventListener('keydown', (e) => {
       if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'SELECT') {
         return;
       }
-      if (e.code === 'Delete' || e.code === 'Backspace') {
-        if (this.selectedTriggerIds.size > 0) {
-          e.preventDefault();
-          this.events.onDeleteSelected(Array.from(this.selectedTriggerIds));
-          this.selectedTriggerIds.clear();
-          this.render();
-        }
-      } else if (e.key === '+' || e.key === '=') {
+      if (e.key === '+' || e.key === '=') {
         e.preventDefault();
         this.setZoom(this.zoomPxPerSec * 1.25);
         if (this.events.onZoomChange) this.events.onZoomChange(this.zoomPxPerSec);
@@ -712,64 +722,76 @@ export class Sequencer {
 
     const gridY = clickY - this.rulerHeight + this.scrollTopPx;
     const laneIdx = Math.floor(gridY / this.laneHeight);
+    if (laneIdx < 0 || laneIdx >= this.lanes.length) return;
 
-    // Ctrl + Right Click Drag -> Erase Brush Mode
-    if (e.button === 2 || (e.ctrlKey && e.button === 2)) {
+    const lane = this.lanes[laneIdx];
+    const rawTime = this.pxToMs(clickX);
+    const snappedTime = this.snapTimeToGrid(rawTime);
+
+    // Tolerance for clicking on an existing trigger (16px)
+    const toleranceMs = (16 / this.zoomPxPerSec) * 1000;
+    const existing = this.triggers.find(
+      (tr) => tr.laneId === lane.id && Math.abs(tr.time - rawTime) <= toleranceMs
+    );
+
+    // Right Click -> Delete note or start drag-erase mode
+    if (e.button === 2) {
+      if (existing) {
+        this.events.onPushHistory?.();
+        this.events.onRemoveTrigger(existing.id);
+        this.selectedTriggerIds.delete(existing.id);
+        this.render();
+        return;
+      }
       this.isErasing = true;
+      this.events.onPushHistory?.();
       this.eraseTriggerAt(clickX, gridY);
       return;
     }
 
-    // Ctrl + Left Click Drag -> Paint Mode
+    // Ctrl + Left Click -> Paint Mode
     if (e.ctrlKey && e.button === 0) {
       this.isPainting = true;
+      this.events.onPushHistory?.();
       this.paintTriggerAt(clickX, gridY);
       return;
     }
 
-    // Standard Left Click on empty space -> Start Marquee Box Selection
+    // Left Click
     if (e.button === 0) {
-      if (laneIdx >= 0 && laneIdx < this.lanes.length) {
-        const lane = this.lanes[laneIdx];
-        const rawTime = this.pxToMs(clickX);
-        const snappedTime = this.snapTimeToGrid(rawTime);
-
-        // Check if clicking directly on an existing trigger
-        const toleranceMs = (14 / this.zoomPxPerSec) * 1000;
-        const existing = this.triggers.find(
-          (tr) => tr.laneId === lane.id && Math.abs(tr.time - snappedTime) <= toleranceMs
-        );
-
-        if (existing) {
-          if (e.shiftKey) {
-            // Toggle selection
-            if (this.selectedTriggerIds.has(existing.id)) {
-              this.selectedTriggerIds.delete(existing.id);
-            } else {
-              this.selectedTriggerIds.add(existing.id);
-            }
+      if (existing) {
+        if (e.shiftKey) {
+          // Toggle selection
+          if (this.selectedTriggerIds.has(existing.id)) {
+            this.selectedTriggerIds.delete(existing.id);
           } else {
-            // Delete existing on click, or select
-            this.events.onRemoveTrigger(existing.id);
+            this.selectedTriggerIds.add(existing.id);
           }
-          this.render();
-          return;
         } else {
-          // If clicked without dragging, clear selection
-          if (!e.shiftKey) {
+          // Keep selection if already part of group, otherwise select only this note
+          if (!this.selectedTriggerIds.has(existing.id)) {
             this.selectedTriggerIds.clear();
+            this.selectedTriggerIds.add(existing.id);
           }
-
-          // Single click place trigger
-          this.events.onAddTrigger(lane.id, snappedTime);
-          this.events.onPreviewSample(lane);
         }
+        this.events.onPreviewSample(lane);
+        this.render();
+        return;
       }
 
-      // Start box selection on drag
-      this.isBoxSelecting = true;
+      // Left click on empty space:
+      // Defer note placement until mouseup so drag-selection does NOT drop an accidental note
+      if (!e.shiftKey) {
+        this.selectedTriggerIds.clear();
+        this.render();
+      }
+
+      this.pendingClickNote = { lane, time: snappedTime };
+      this.mouseDownPos = { x: clickX, y: clickY };
       this.selectionStart = { x: clickX, y: clickY };
       this.selectionCurrent = { x: clickX, y: clickY };
+      this.isBoxSelecting = false;
+      this.initialSelection = new Set(this.selectedTriggerIds);
     }
   }
 
@@ -815,10 +837,20 @@ export class Sequencer {
       return;
     }
 
+    // Threshold check for drag marquee selection
+    if (this.pendingClickNote) {
+      const dist = Math.hypot(mouseX - this.mouseDownPos.x, mouseY - this.mouseDownPos.y);
+      if (dist >= 5) {
+        // User dragged: cancel pending single click placement, start box select!
+        this.pendingClickNote = null;
+        this.isBoxSelecting = true;
+      }
+    }
+
     // Box selection update
     if (this.isBoxSelecting) {
       this.selectionCurrent = { x: mouseX, y: mouseY };
-      this.updateBoxSelection();
+      this.updateBoxSelection(e.shiftKey);
       this.render();
     }
   }
@@ -833,6 +865,15 @@ export class Sequencer {
     if (this.isPanning) {
       this.isPanning = false;
       this.canvas.style.cursor = '';
+    }
+
+    // If mouse released without dragging, place note
+    if (this.pendingClickNote) {
+      this.events.onPushHistory?.();
+      this.events.onAddTrigger(this.pendingClickNote.lane.id, this.pendingClickNote.time);
+      this.events.onPreviewSample(this.pendingClickNote.lane);
+      this.pendingClickNote = null;
+      this.render();
     }
 
     if (this.isBoxSelecting) {
@@ -879,10 +920,11 @@ export class Sequencer {
 
     if (existing) {
       this.events.onRemoveTrigger(existing.id);
+      this.selectedTriggerIds.delete(existing.id);
     }
   }
 
-  private updateBoxSelection() {
+  private updateBoxSelection(keepExisting = false) {
     const minX = Math.min(this.selectionStart.x, this.selectionCurrent.x);
     const maxX = Math.max(this.selectionStart.x, this.selectionCurrent.x);
     const minY = Math.min(this.selectionStart.y, this.selectionCurrent.y);
@@ -896,15 +938,20 @@ export class Sequencer {
       laneIndexMap.set(this.lanes[i].id, i);
     }
 
-    this.selectedTriggerIds.clear();
+    this.selectedTriggerIds = keepExisting ? new Set(this.initialSelection) : new Set();
+
+    const triggerW = Math.max(6, Math.min(26, this.zoomPxPerSec * 0.035));
+    const halfWTime = ((triggerW / 2) / this.zoomPxPerSec) * 1000;
 
     for (const tr of this.triggers) {
-      if (tr.time >= minTime && tr.time <= maxTime) {
+      if (tr.time + halfWTime >= minTime && tr.time - halfWTime <= maxTime) {
         const lIdx = laneIndexMap.get(tr.laneId);
         if (lIdx === undefined) continue;
 
-        const triggerY = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + this.laneHeight / 2;
-        if (triggerY >= minY && triggerY <= maxY) {
+        const noteTop = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
+        const noteBottom = noteTop + this.laneHeight - 12;
+
+        if (noteBottom >= minY && noteTop <= maxY) {
           this.selectedTriggerIds.add(tr.id);
         }
       }

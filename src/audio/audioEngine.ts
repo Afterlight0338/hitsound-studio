@@ -1,5 +1,4 @@
 import type { Lane, Trigger } from '../types';
-import { createSynthesizedSample } from './synthesizer';
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -24,8 +23,7 @@ export class AudioEngine {
   private scheduleTimer: number | null = null;
   private scheduledTriggerIds = new Set<string>();
 
-  // Synth cache & custom samples
-  private synthCache = new Map<string, AudioBuffer>();
+  // Custom samples from mapset or user
   private customSamples = new Map<string, AudioBuffer>();
   private laneBufferCache = new Map<string, AudioBuffer>();
 
@@ -177,9 +175,10 @@ export class AudioEngine {
   }
 
   /**
-   * Resolves sample audio buffer: checks cache -> custom sample files from map -> synth fallback
+   * Resolves sample audio buffer: checks lane.audioBuffer -> custom sample files from map -> null
+   * No synthetic fallback: only real samples from the beatmap or user imports are played.
    */
-  public getSampleBuffer(lane: Lane): AudioBuffer {
+  public getSampleBuffer(lane: Lane): AudioBuffer | null {
     if (lane.audioBuffer) return lane.audioBuffer;
 
     const cacheKey = `${lane.id}_${lane.sampleSet}_${lane.addition}_${lane.customIndex}`;
@@ -202,6 +201,12 @@ export class AudioEngine {
     }
     searchKeys.push(`${baseName}.wav`, `${baseName}.ogg`, `${baseName}.mp3`);
 
+    // Also check clean lane name if custom
+    const cleanLaneName = lane.name.trim().toLowerCase();
+    if (cleanLaneName) {
+      searchKeys.push(cleanLaneName, `${cleanLaneName}.wav`, `${cleanLaneName}.ogg`, `${cleanLaneName}.mp3`);
+    }
+
     for (const key of searchKeys) {
       if (this.customSamples.has(key)) {
         const buf = this.customSamples.get(key)!;
@@ -210,28 +215,7 @@ export class AudioEngine {
       }
     }
 
-    // Procedural synthesis fallback
-    const ctx = this.ensureContext();
-    let synthKey = 'soft-hitnormal';
-
-    if (lane.addition === 'Clap') {
-      synthKey = lane.sampleSet === 'Drum' ? 'drum-hitclap' : 'soft-hitclap';
-    } else if (lane.addition === 'Whistle') {
-      synthKey = 'soft-hitwhistle';
-    } else if (lane.addition === 'Finish') {
-      synthKey = 'soft-hitfinish';
-    } else {
-      synthKey = lane.sampleSet === 'Drum' ? 'drum-hitnormal' : 'soft-hitnormal';
-    }
-
-    if (!this.synthCache.has(synthKey)) {
-      const buf = createSynthesizedSample(ctx, synthKey as any);
-      this.synthCache.set(synthKey, buf);
-    }
-
-    const res = this.synthCache.get(synthKey)!;
-    this.laneBufferCache.set(cacheKey, res);
-    return res;
+    return null;
   }
 
   public updateSchedulerData(lanes: Lane[], triggers: Trigger[]) {
@@ -330,9 +314,11 @@ export class AudioEngine {
     return Math.max(0, this.pauseOffsetMs + elapsedSec * 1000);
   }
 
-  public playSingleSample(lane: Lane, volumeOverride?: number) {
-    const ctx = this.ensureContext();
+  public playSingleSample(lane: Lane, volumeOverride?: number): boolean {
     const buffer = this.getSampleBuffer(lane);
+    if (!buffer) return false;
+
+    const ctx = this.ensureContext();
     const source = ctx.createBufferSource();
     source.buffer = buffer;
 
@@ -343,6 +329,7 @@ export class AudioEngine {
     source.connect(gain);
     gain.connect(this.hitsoundGainNode!);
     source.start();
+    return true;
   }
 
   private startScheduler() {
@@ -404,6 +391,8 @@ export class AudioEngine {
         // Ensure we only schedule within the valid context horizon
         if (scheduledCtxTime >= this.ctx.currentTime - 0.008) {
           const buffer = this.getSampleBuffer(lane);
+          if (!buffer) continue;
+
           const source = this.ctx.createBufferSource();
           source.buffer = buffer;
 

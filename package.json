@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "npx tsx test/test_core.ts"
+    "test": "npx tsx test/test_core.ts && npx tsx test/test_daw.ts"
   },
   "devDependencies": {
     "@types/jszip": "^3.4.0",

@@ -7,7 +7,6 @@ import { importHitsoundsFromBeatmap } from '../osu/hitsoundImporter';
 import { parseOsu } from '../osu/parser';
 import type {
   CopierOptions,
-  HitObject,
   Lane,
   OsuBeatmap,
   TimingPoint,
@@ -32,6 +31,15 @@ export class App {
   private artist = 'Unknown Artist';
   private creator = 'Mapper';
   private audioFileName = 'audio.mp3';
+
+  // History (Undo / Redo)
+  private undoStack: Trigger[][] = [];
+  private redoStack: Trigger[][] = [];
+  private readonly maxHistory = 50;
+
+  // Clipboard & Toast
+  private clipboard: { laneId: string; relTime: number; volume?: number }[] = [];
+  private toastTimeout: number | null = null;
 
   constructor() {
     this.audioEngine = new AudioEngine();
@@ -179,7 +187,6 @@ export class App {
             </nav>
 
             <button id="btn-reset" class="btn btn-outline" title="Reset all and start fresh">🔄 Reset</button>
-            <button id="btn-demo" class="btn btn-outline" title="Load demo song and beatmap">Load Demo</button>
             <label class="btn btn-outline file-btn">
               Import .osz / .osu
               <input type="file" id="file-input" accept="*/*" multiple hidden>
@@ -219,7 +226,7 @@ export class App {
             <div class="sequencer-container">
               <canvas id="sequencer-canvas"></canvas>
               <div class="hint-bar">
-                💡 <strong>Ctrl + Drag</strong>: Paint | <strong>Right-Click Drag</strong>: Erase | <strong>Drag</strong>: Select | <strong>Del</strong>: Delete
+                💡 <strong>Click</strong>: Place | <strong>Drag</strong>: Select | <strong>Ctrl+Drag</strong>: Paint | <strong>Right-Click</strong>: Erase | <strong>Ctrl+Z</strong>: Undo | <strong>C / V</strong>: Copy/Paste | <strong>Del / X</strong>: Delete
               </div>
             </div>
           </div>
@@ -319,6 +326,7 @@ export class App {
             </div>
           </div>
         </main>
+        <div id="toast-container" class="toast-container"></div>
       </div>
     `;
 
@@ -344,10 +352,8 @@ export class App {
         this.triggers = this.triggers.filter((t) => t.id !== triggerId);
         this.updateSequencerData();
       },
-      onDeleteSelected: (triggerIds) => {
-        const idSet = new Set(triggerIds);
-        this.triggers = this.triggers.filter((t) => !idSet.has(t.id));
-        this.updateSequencerData();
+      onDeleteSelected: () => {
+        this.deleteSelected();
       },
       onSeek: (timeMs) => {
         this.audioEngine.seek(timeMs, this.lanes, this.triggers);
@@ -365,6 +371,9 @@ export class App {
       onZoomChange: (newZoom) => {
         const slider = document.getElementById('slider-zoom') as HTMLInputElement;
         if (slider) slider.value = String(Math.round(newZoom));
+      },
+      onPushHistory: () => {
+        this.pushHistorySnapshot();
       },
     });
 
@@ -505,9 +514,6 @@ export class App {
       }
     });
 
-    // Demo Button
-    document.getElementById('btn-demo')?.addEventListener('click', () => this.loadDemoProject());
-
     // Export Hitsounds.osu
     document.getElementById('btn-export-diff')?.addEventListener('click', () => this.exportHitsoundDiff());
 
@@ -571,18 +577,29 @@ export class App {
 
   private setupGlobalShortcuts() {
     window.addEventListener('keydown', (e) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'SELECT') {
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return;
       }
 
       if (e.code === 'Space') {
         e.preventDefault();
         this.togglePlay();
-      } else if (e.code === 'Home') {
+        return;
+      }
+
+      if (this.activeTab !== 'studio') {
+        return;
+      }
+
+      if (e.code === 'Home') {
         e.preventDefault();
         this.audioEngine.seek(0, this.lanes, this.triggers);
         this.sequencer.setTime(0);
-      } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        return;
+      }
+
+      if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
         e.preventDefault();
         const cur = this.audioEngine.getCurrentTimeMs();
         const redLine = this.sequencer.findActiveRedLine(cur);
@@ -590,20 +607,85 @@ export class App {
         const target = Math.max(0, cur + step);
         this.audioEngine.seek(target, this.lanes, this.triggers);
         this.sequencer.setTime(target);
-      } else if (e.key >= '1' && e.key <= '6') {
+        return;
+      }
+
+      if (e.key >= '1' && e.key <= '6') {
         const divisors = [1, 2, 4, 3, 6, 8];
         const d = divisors[parseInt(e.key, 10) - 1];
         if (d) {
           const sel = document.getElementById('select-snap') as HTMLSelectElement;
           if (sel) sel.value = String(d);
           this.sequencer.setSnapDivisor(d);
+          return;
         }
-      } else if (e.key === 'g' || e.key === 'G') {
+      }
+
+      if (e.key === 'g' || e.key === 'G') {
         e.preventDefault();
         this.sequencer.showGhostNotes = !this.sequencer.showGhostNotes;
         const btnGhost = document.getElementById('btn-toggle-ghost');
         btnGhost?.classList.toggle('active', this.sequencer.showGhostNotes);
         this.sequencer.render();
+        return;
+      }
+
+      // Undo: Ctrl+Z (without Shift)
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        this.undo();
+        return;
+      }
+
+      // Redo: Ctrl+Y OR Ctrl+Shift+Z
+      if ((e.ctrlKey || e.metaKey) && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+        e.preventDefault();
+        this.redo();
+        return;
+      }
+
+      // Copy: Ctrl+C OR c
+      if (((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) || (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'c' || e.key === 'C'))) {
+        e.preventDefault();
+        this.copySelected();
+        return;
+      }
+
+      // Cut: Ctrl+X
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'x' || e.key === 'X')) {
+        e.preventDefault();
+        this.cutSelected();
+        return;
+      }
+
+      // Delete: Delete, Backspace, OR x (without Ctrl/Alt)
+      if (e.code === 'Delete' || e.code === 'Backspace' || (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'x' || e.key === 'X'))) {
+        if (this.sequencer.selectedTriggerIds.size > 0) {
+          e.preventDefault();
+          this.deleteSelected();
+          return;
+        }
+      }
+
+      // Paste: Ctrl+V OR v
+      if (((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) || (!e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'v' || e.key === 'V'))) {
+        e.preventDefault();
+        this.paste();
+        return;
+      }
+
+      // Select All: Ctrl+A
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        this.selectAll();
+        return;
+      }
+
+      // Deselect All: Escape
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.sequencer.deselectAll();
+        return;
       }
     });
   }
@@ -631,6 +713,158 @@ export class App {
       document.getElementById('view-copier')?.classList.add('active');
       this.updateCopierTargetsList();
     }
+  }
+
+  // --- History & Clipboard Operations ---
+
+  public pushHistorySnapshot() {
+    const snapshot = this.triggers.map((t) => ({ ...t }));
+    this.undoStack.push(snapshot);
+    if (this.undoStack.length > this.maxHistory) {
+      this.undoStack.shift();
+    }
+    this.redoStack = [];
+  }
+
+  public undo() {
+    if (this.undoStack.length === 0) {
+      this.showToast('Nothing to undo');
+      return;
+    }
+    this.redoStack.push(this.triggers.map((t) => ({ ...t })));
+    this.triggers = this.undoStack.pop()!;
+
+    const currentIds = new Set(this.triggers.map((t) => t.id));
+    for (const id of this.sequencer.selectedTriggerIds) {
+      if (!currentIds.has(id)) {
+        this.sequencer.selectedTriggerIds.delete(id);
+      }
+    }
+
+    this.updateSequencerData();
+    this.showToast('↩ Undone');
+  }
+
+  public redo() {
+    if (this.redoStack.length === 0) {
+      this.showToast('Nothing to redo');
+      return;
+    }
+    this.undoStack.push(this.triggers.map((t) => ({ ...t })));
+    this.triggers = this.redoStack.pop()!;
+
+    const currentIds = new Set(this.triggers.map((t) => t.id));
+    for (const id of this.sequencer.selectedTriggerIds) {
+      if (!currentIds.has(id)) {
+        this.sequencer.selectedTriggerIds.delete(id);
+      }
+    }
+
+    this.updateSequencerData();
+    this.showToast('↪ Redone');
+  }
+
+  public copySelected() {
+    const selected = this.triggers.filter((tr) => this.sequencer.selectedTriggerIds.has(tr.id));
+    if (selected.length === 0) {
+      this.showToast('No notes selected to copy');
+      return;
+    }
+    selected.sort((a, b) => a.time - b.time);
+    const minTime = selected[0].time;
+    this.clipboard = selected.map((tr) => ({
+      laneId: tr.laneId,
+      relTime: tr.time - minTime,
+      volume: tr.volume,
+    }));
+    this.showToast(`📋 Copied ${this.clipboard.length} note${this.clipboard.length > 1 ? 's' : ''}`);
+  }
+
+  public cutSelected() {
+    const selected = this.triggers.filter((tr) => this.sequencer.selectedTriggerIds.has(tr.id));
+    if (selected.length === 0) {
+      this.showToast('No notes selected to cut');
+      return;
+    }
+    this.copySelected();
+    this.deleteSelected();
+  }
+
+  public paste() {
+    if (this.clipboard.length === 0) {
+      this.showToast('Clipboard empty');
+      return;
+    }
+    this.pushHistorySnapshot();
+
+    const pasteBaseTime = this.sequencer.snapTimeToGrid(this.sequencer.currentTimeMs);
+    const laneIds = new Set(this.lanes.map((l) => l.id));
+    const fallbackLaneId = this.lanes[0]?.id || '';
+    const newSelectedIds = new Set<string>();
+
+    for (const item of this.clipboard) {
+      const laneId = laneIds.has(item.laneId) ? item.laneId : fallbackLaneId;
+      const targetTime = Math.max(0, Math.round(pasteBaseTime + item.relTime));
+
+      const existing = this.triggers.find((t) => t.laneId === laneId && Math.abs(t.time - targetTime) < 2);
+      if (!existing) {
+        const newTr: Trigger = {
+          id: `tr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          laneId,
+          time: targetTime,
+          volume: item.volume,
+        };
+        this.triggers.push(newTr);
+        newSelectedIds.add(newTr.id);
+      } else {
+        newSelectedIds.add(existing.id);
+      }
+    }
+
+    this.sequencer.selectedTriggerIds = newSelectedIds;
+    this.updateSequencerData();
+    this.showToast(`📥 Pasted ${newSelectedIds.size} note${newSelectedIds.size > 1 ? 's' : ''}`);
+  }
+
+  public deleteSelected() {
+    if (this.sequencer.selectedTriggerIds.size === 0) return;
+    this.pushHistorySnapshot();
+    const count = this.sequencer.selectedTriggerIds.size;
+    const idSet = new Set(this.sequencer.selectedTriggerIds);
+    this.triggers = this.triggers.filter((t) => !idSet.has(t.id));
+    this.sequencer.selectedTriggerIds.clear();
+    this.updateSequencerData();
+    this.showToast(`🗑 Deleted ${count} note${count > 1 ? 's' : ''}`);
+  }
+
+  public selectAll() {
+    this.sequencer.selectAll();
+    this.showToast(`Selected all ${this.triggers.length} notes`);
+  }
+
+  public showToast(message: string) {
+    let container = document.getElementById('toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toast-container';
+      container.className = 'toast-container';
+      document.body.appendChild(container);
+    }
+
+    container.innerHTML = '';
+    const toast = document.createElement('div');
+    toast.className = 'toast show';
+    toast.textContent = message;
+    container.appendChild(toast);
+
+    if (this.toastTimeout !== null) {
+      clearTimeout(this.toastTimeout);
+    }
+    this.toastTimeout = window.setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 200);
+      this.toastTimeout = null;
+    }, 1400);
   }
 
   // --- Dynamic Lanes Management ---
@@ -741,7 +975,10 @@ export class App {
 
       const btnPlaySample = el.querySelector('.btn-play-sample') as HTMLButtonElement;
       btnPlaySample.addEventListener('click', () => {
-        this.audioEngine.playSingleSample(lane);
+        const played = this.audioEngine.playSingleSample(lane);
+        if (!played) {
+          this.showToast(`No sample file loaded for "${lane.name}"`);
+        }
       });
 
       const btnDel = el.querySelector('.btn-del-lane') as HTMLButtonElement;
@@ -788,6 +1025,8 @@ export class App {
 
     this.lanes = res.lanes;
     this.triggers = res.triggers;
+    this.undoStack = [];
+    this.redoStack = [];
     this.renderLanesList();
     this.updateSequencerData();
     if (showAlert) {
@@ -821,6 +1060,9 @@ export class App {
     this.initDefaultLanes();
     this.initDefaultTiming();
     this.triggers = [];
+    this.undoStack = [];
+    this.redoStack = [];
+    this.clipboard = [];
 
     // Clear file inputs so re-importing the same file works
     const fileInput = document.getElementById('file-input') as HTMLInputElement;
@@ -1180,151 +1422,5 @@ export class App {
 
   public async downloadFullOsz() {
     await this.executeCopier(true);
-  }
-
-  // --- Built-in Demo Generator ---
-
-  public loadDemoProject() {
-    const ctx = this.audioEngine.getContext();
-    const sampleRate = ctx.sampleRate;
-    const duration = 24; // 24 seconds demo loop
-    const songBuf = ctx.createBuffer(2, Math.floor(sampleRate * duration), sampleRate);
-
-    const left = songBuf.getChannelData(0);
-    const right = songBuf.getChannelData(1);
-
-    const bpm = 175;
-    const beatSec = 60 / bpm;
-
-    const chords = [
-      [164.81, 196.0, 246.94], // Em
-      [130.81, 164.81, 196.0],  // C
-      [196.0, 246.94, 293.66],  // G
-      [146.83, 185.0, 220.0],   // D
-    ];
-
-    for (let i = 0; i < left.length; i++) {
-      const t = i / sampleRate;
-      const beatIdx = Math.floor(t / beatSec);
-      const chordIdx = Math.floor(beatIdx / 4) % chords.length;
-      const chord = chords[chordIdx];
-
-      const arpNote = chord[beatIdx % 3] / 2;
-      const bassEnv = Math.exp(-(t % (beatSec / 2)) * 12);
-      const bass = Math.sin(2 * Math.PI * arpNote * t) * bassEnv * 0.4;
-
-      let pad = 0;
-      for (const note of chord) {
-        pad += Math.sin(2 * Math.PI * note * t) * 0.08;
-      }
-
-      const beatPhase = (t % beatSec) / beatSec;
-      const isKickBeat = beatIdx % 2 === 0;
-      const isSnareBeat = beatIdx % 2 === 1;
-
-      let drum = 0;
-      if (isKickBeat) {
-        const kEnv = Math.exp(-beatPhase * 18);
-        drum += Math.sin(2 * Math.PI * (60 + 90 * kEnv) * t) * kEnv * 0.6;
-      }
-      if (isSnareBeat) {
-        const sEnv = Math.exp(-beatPhase * 15);
-        drum += (Math.random() * 2 - 1) * sEnv * 0.4;
-      }
-
-      const total = (bass + pad + drum) * 0.6;
-      left[i] = total;
-      right[i] = total;
-    }
-
-    this.audioEngine.setSongBuffer(songBuf);
-
-    this.timingPoints = [
-      {
-        time: 0,
-        beatLength: (60 / bpm) * 1000,
-        meter: 4,
-        sampleSet: 2,
-        sampleIndex: 0,
-        volume: 100,
-        uninherited: true,
-        effects: 0,
-      },
-    ];
-
-    const demoHitObjects: HitObject[] = [];
-    const beatMs = (60 / bpm) * 1000;
-
-    for (let b = 0; b < 64; b++) {
-      const time = Math.round(b * beatMs);
-      if (b % 4 === 2) {
-        demoHitObjects.push({
-          x: 200 + (b % 8) * 20,
-          y: 150 + (b % 4) * 20,
-          time,
-          type: 2,
-          hitSound: 0,
-          slides: 1,
-          length: 120,
-          endTime: time + Math.round(beatMs),
-          rawString: '',
-        });
-      } else {
-        demoHitObjects.push({
-          x: 100 + (b % 8) * 35,
-          y: 120 + (b % 6) * 30,
-          time,
-          type: 1,
-          hitSound: 0,
-          rawString: '',
-        });
-      }
-    }
-
-    const demoBeatmap: OsuBeatmap = {
-      version: 14,
-      general: { AudioFilename: 'audio.mp3', SampleSet: 'Soft', Mode: '0' },
-      editor: { BeatDivisor: '4', GridSize: '16', TimelineZoom: '2' },
-      metadata: { Title: 'Hitsound Studio Theme', Artist: 'Antigravity', Creator: 'Mappers', Version: 'Expert' },
-      difficulty: { HPDrainRate: '5', CircleSize: '4', OverallDifficulty: '8', ApproachRate: '9', SliderMultiplier: '1.4', SliderTickRate: '1' },
-      events: [],
-      timingPoints: this.timingPoints,
-      colours: {},
-      hitObjects: demoHitObjects,
-      rawText: '',
-      fileName: 'Antigravity - Hitsound Studio Theme (Mappers) [Expert].osu',
-    };
-
-    const normalBeatmap: OsuBeatmap = {
-      ...demoBeatmap,
-      metadata: { ...demoBeatmap.metadata, Version: 'Normal' },
-      hitObjects: demoHitObjects.filter((_, idx) => idx % 2 === 0),
-      fileName: 'Antigravity - Hitsound Studio Theme (Mappers) [Normal].osu',
-    };
-
-    this.allBeatmaps = [demoBeatmap, normalBeatmap];
-    this.referenceBeatmap = demoBeatmap;
-
-    // Place initial sample triggers starting from beat 1 (avoid beat 0 drum surprise)
-    this.triggers = [];
-    const clapLane = this.lanes.find((l) => l.addition === 'Clap') || this.lanes[0];
-    const kickLane = this.lanes.find((l) => l.name.includes('Kick')) || this.lanes[3];
-    const whistleLane = this.lanes.find((l) => l.addition === 'Whistle') || this.lanes[1];
-
-    for (let b = 1; b < 32; b++) {
-      const t = Math.round(b * beatMs);
-      if (b % 2 === 0) {
-        this.triggers.push({ id: `tr-k-${b}`, laneId: kickLane.id, time: t });
-      } else {
-        this.triggers.push({ id: `tr-c-${b}`, laneId: clapLane.id, time: t });
-      }
-      if (b % 4 === 0) {
-        this.triggers.push({ id: `tr-w-${b}`, laneId: whistleLane.id, time: t });
-      }
-    }
-
-    this.updateBeatmapSelectors();
-    this.updateSequencerData();
-    alert('Demo loaded! Press Space to Play, Ctrl+Drag to paint notes, and test the Copier.');
   }
 }

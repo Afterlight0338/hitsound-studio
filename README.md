@@ -2,6 +2,8 @@
 
 A lightweight, blazing-fast, web-based DAW and hitsounding environment designed specifically for osu! standard mappers.
 
+🔗 **Live App:** [https://hitsound.vivlos.dev/](https://hitsound.vivlos.dev/)
+
 ---
 
 ## 🎯 The Vision & Philosophy
@@ -13,6 +15,7 @@ Hitsounding in osu! has traditionally been an exercise in frustration: juggling 
 ### Core Principles
 * **Lightweight & Fast:** Zero heavy 3D or bloated UI frameworks. Pure TypeScript + fast 2D Canvas + Web Audio API. Builds in under 100ms.
 * **100% Client-Side:** No server required. Runs locally in your browser. All `.osz` and `.osu` files remain private on your machine.
+* **Pure & Raw:** Uses only genuine audio files from the loaded beatmapset or user imports. Zero artificial or procedural samples interfering with playback.
 * **Non-Destructive Hitsound Diff Standard:** Exports a clean `[Hitsounds].osu` diff with all notes placed dead-center at `(256, 192)`, fully compatible with the official osu! editor.
 * **Built-in Hitsound Copier:** Merges hitsounds directly into your mapset's difficulties while **strictly preserving Slider Velocity (SV)**.
 
@@ -28,20 +31,28 @@ Hitsounding in osu! has traditionally been an exercise in frustration: juggling 
   * **Custom Index:** `#0` (default) or custom sample number `#1, #2, #3...`
   * **Lane Volume:** 0% – 100%
 * Solo (S) and Mute (M) buttons for isolated monitoring.
-* Drop custom `.wav` files directly onto lanes or use built-in procedural synthesis.
+* Automatically resolves custom `.wav`, `.ogg`, and `.mp3` samples from your `.osz`.
 
 ### 2. High-Performance Canvas Sequencer
 * **Waveform & Transients:** Downsampled audio waveform showing song transients (punchy beats, kicks, snares) highlighted in gold.
 * **Beat Snapping:** Dynamic grid lines based on the song's BPM and timing points (1/1, 1/2, 1/4, 1/3, 1/6, 1/8, 1/12, 1/16).
 * **Ghost Notes:** Overlay hit objects (circles, sliders, repeats) from any difficulty in your mapset in translucent grey so you can align hitsounds directly with the player's inputs.
 * **Lookahead Audio Scheduler:** High-precision Web Audio clock with lookahead scheduling ensures zero audio jitter or lag.
+* **Fluid Navigation:** Middle-click hand pan, trackpad 2-finger horizontal swipe, zoom up to 4,000 px/sec, and overview bottom scrollbar.
 
-### 3. Dedicated `[Hitsounds].osu` Generator
+### 3. Full DAW Editing & Keybinds
+* **Undo & Redo (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`):** 50-step undo/redo history for single additions, deletions, paint brush strokes, and pastes.
+* **Copy & Paste (`Ctrl+C` / `c`, `Ctrl+V` / `v`):** Multi-lane pattern copying with relative timing offsets preserved, pasted snapped to the current playhead.
+* **Cut & Delete (`Ctrl+X`, `Delete` / `Backspace` / `x`):** Clean batch deletion.
+* **Marquee Box Selection:** Left-click and drag across any area to multi-select triggers without dropping accidental notes.
+* **Paint & Erase Brushes:** `Ctrl + Drag` to paint continuous notes; `Right-Click Drag` to sweep-erase notes.
+
+### 4. Dedicated `[Hitsounds].osu` Generator
 * Combines simultaneous lane triggers at the same timestamp into valid hitsound bitmasks (e.g., Clap `8` + Whistle `2` = `10`).
 * Emits hit circles at coordinates `x=256, y=192`.
 * Automatically generates uninherited timing points (green lines) for volume and sample set changes.
 
-### 4. Built-In Hitsound Copier
+### 5. Built-In Hitsound Copier
 * Select your target difficulties (`Easy`, `Normal`, `Hard`, `Insane`, `Expert`).
 * Configurable snap tolerance (e.g. ±5ms).
 * Precision transfer:
@@ -51,9 +62,6 @@ Hitsounding in osu! has traditionally been an exercise in frustration: juggling 
   * Green timing point volumes
 * **Preserves target diff's Slider Velocity (SV)** without overwriting them.
 * One-click download as an updated `.osz` or `.osu` bundle.
-
-### 5. Built-in Demo Beatmap
-* Click **"Load Demo"** in the top bar to immediately explore the interface with a procedurally generated 175 BPM synth-pop track, jump circles, sliders, and pre-placed hitsound triggers.
 
 ---
 
@@ -65,7 +73,8 @@ Hitsounding in osu! has traditionally been an exercise in frustration: juggling 
 ### Install & Run Locally
 
 ```bash
-# Clone or navigate to directory
+# Clone repository
+git clone https://github.com/Afterlight0338/hitsound-studio.git
 cd hitsound-studio
 
 # Install dependencies
@@ -89,7 +98,7 @@ npm test
 npm run build
 ```
 
-The production output is generated in `dist/` and can be hosted statically on GitHub Pages, Cloudflare Pages, or Netlify.
+Production output is generated in `dist/` and hosted live at [https://hitsound.vivlos.dev/](https://hitsound.vivlos.dev/).
 
 ---
 
@@ -101,7 +110,25 @@ The production output is generated in `dist/` and can be hosted statically on Gi
 | `Home` | Return to start (00:00.000) |
 | `Left / Right Arrow` | Step backward / forward by 1 snap divisor |
 | `1` – `6` | Quick switch snap divisor (`1/1`, `1/2`, `1/4`, `1/3`, `1/6`, `1/8`) |
+| `G` | Toggle Ghost Notes visibility |
+| `Left Click` | Place trigger (on release) / Select note |
+| `Left Click Drag` | Marquee box select notes |
+| `Ctrl + Drag` | Paint mode (continuous trigger placement) |
+| `Right Click` | Delete note / Erase drag mode |
+| `Ctrl + Z` | Undo |
+| `Ctrl + Y` / `Ctrl + Shift + Z` | Redo |
+| `Ctrl + C` / `c` | Copy selected notes |
+| `Ctrl + X` | Cut selected notes |
+| `Ctrl + V` / `v` | Paste notes at playhead |
+| `Delete` / `Backspace` / `x` | Delete selected notes |
+| `Ctrl + A` | Select all notes |
+| `Escape` | Deselect all |
 | `Ctrl + Mouse Wheel` | Zoom timeline in / out |
-| `Mouse Wheel` | Scroll timeline horizontally |
-| `Left Click` | Place trigger on grid / scrub on ruler |
-| `Right Click` | Delete trigger |
+| `Shift + Mouse Wheel` | Scroll timeline horizontally |
+| `Middle Click Drag` / `Alt + Drag` | Hand pan tool |
+
+---
+
+## 📄 License
+
+MIT © [Afterlight0338](https://github.com/Afterlight0338)
