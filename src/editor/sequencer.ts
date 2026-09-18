@@ -18,6 +18,7 @@ export class Sequencer {
   private lanes: Lane[] = [];
   private triggers: Trigger[] = [];
   private timingPoints: TimingPoint[] = [];
+  public kiaiIntervals: { start: number; end: number }[] = [];
   private ghostHitObjects: HitObject[] = [];
 
   private waveformPeaks: Float32Array | null = null;
@@ -89,12 +90,51 @@ export class Sequencer {
   ) {
     this.lanes = lanes;
     this.triggers = triggers;
-    this.timingPoints = timingPoints;
+    this.timingPoints = [...timingPoints].sort((a, b) => a.time - b.time || (a.uninherited ? -1 : 1));
     this.ghostHitObjects = ghostNotes;
     this.waveformPeaks = waveform.peaks;
     this.transientPeaks = waveform.transients;
     this.durationMs = Math.max(waveform.duration * 1000, 10000);
+    this.kiaiIntervals = this.computeKiaiIntervals();
     this.render();
+  }
+
+  private computeKiaiIntervals(): { start: number; end: number }[] {
+    const intervals: { start: number; end: number }[] = [];
+    let currentStart: number | null = null;
+
+    for (let i = 0; i < this.timingPoints.length; i++) {
+      const tp = this.timingPoints[i];
+      const isKiai = (tp.effects & 1) !== 0;
+
+      if (isKiai && currentStart === null) {
+        currentStart = tp.time;
+      } else if (!isKiai && currentStart !== null) {
+        intervals.push({ start: currentStart, end: tp.time });
+        currentStart = null;
+      }
+    }
+
+    if (currentStart !== null) {
+      intervals.push({ start: currentStart, end: Math.max(currentStart + 10000, this.durationMs) });
+    }
+
+    return intervals;
+  }
+
+  public isKiaiAtTime(timeMs: number): boolean {
+    for (const interval of this.kiaiIntervals) {
+      if (timeMs >= interval.start && timeMs <= interval.end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public getActiveBpm(timeMs: number): number {
+    const rl = this.findActiveRedLine(timeMs);
+    if (!rl || rl.beatLength <= 0) return 120;
+    return Math.round(60000 / rl.beatLength);
   }
 
   public setTime(timeMs: number, triggerRender: boolean = true) {
@@ -184,14 +224,38 @@ export class Sequencer {
   }
 
   public snapTimeToGrid(timeMs: number): number {
-    const redLine = this.findActiveRedLine(timeMs);
-    const beatLength = redLine.beatLength;
-    const snapInterval = beatLength / this.activeSnapDivisor;
+    const redLines = this.timingPoints.filter((tp) => tp.uninherited);
+    if (redLines.length === 0) return Math.max(0, timeMs);
 
-    const offset = redLine.time;
-    const diff = timeMs - offset;
+    let activeIdx = 0;
+    for (let i = 0; i < redLines.length; i++) {
+      if (redLines[i].time <= timeMs) {
+        activeIdx = i;
+      } else {
+        break;
+      }
+    }
+
+    const rl = redLines[activeIdx];
+    const snapInterval = rl.beatLength / this.activeSnapDivisor;
+    const diff = timeMs - rl.time;
     const snappedDiff = Math.round(diff / snapInterval) * snapInterval;
-    return Math.max(0, Math.round(offset + snappedDiff));
+    const snappedTime = Math.max(0, Math.round(rl.time + snappedDiff));
+
+    // Evaluate multiple BPM boundary: check if next red line snap is closer
+    const nextRl = redLines[activeIdx + 1];
+    if (nextRl && snappedTime >= nextRl.time) {
+      const nextSnapInterval = nextRl.beatLength / this.activeSnapDivisor;
+      const nextDiff = timeMs - nextRl.time;
+      const nextSnappedDiff = Math.round(nextDiff / nextSnapInterval) * nextSnapInterval;
+      const nextSnappedTime = Math.max(0, Math.round(nextRl.time + nextSnappedDiff));
+
+      if (Math.abs(timeMs - nextSnappedTime) < Math.abs(timeMs - snappedTime)) {
+        return nextSnappedTime;
+      }
+    }
+
+    return snappedTime;
   }
 
   // --- Main Render ---
@@ -244,6 +308,29 @@ export class Sequencer {
     // Ruler Background
     this.ctx.fillStyle = '#14171f';
     this.ctx.fillRect(0, 0, width, rulerH);
+
+    // 0. Highlight Kiai Time zones on ruler (warm glowing amber wash with top border)
+    for (const kiai of this.kiaiIntervals) {
+      if (kiai.end < viewStartMs || kiai.start > viewEndMs) continue;
+      const startX = Math.max(0, this.msToPx(kiai.start));
+      const endX = Math.min(width, this.msToPx(kiai.end));
+      const w = Math.max(2, endX - startX);
+
+      // Warm amber glow wash
+      this.ctx.fillStyle = 'rgba(255, 170, 0, 0.20)';
+      this.ctx.fillRect(startX, 0, w, rulerH);
+
+      // Top highlight border
+      this.ctx.fillStyle = '#ffaa00';
+      this.ctx.fillRect(startX, 0, w, 3);
+
+      // Stylish label at kiai start if visible
+      if (startX >= 0 && startX <= width - 50) {
+        this.ctx.fillStyle = 'rgba(255, 170, 0, 0.95)';
+        this.ctx.font = 'bold 9px monospace';
+        this.ctx.fillText('🔥 KIAI', startX + 4, 12);
+      }
+    }
 
     // Draw Audio Waveform inside ruler
     if (this.waveformPeaks) {
@@ -361,6 +448,35 @@ export class Sequencer {
 
         cumulativeMeasure += measuresInSegment;
       }
+
+      // Draw Red Timing Lines (BPM Changes) on Ruler
+      for (let i = 0; i < redLines.length; i++) {
+        const rl = redLines[i];
+        if (rl.time < viewStartMs - 1000 || rl.time > viewEndMs + 1000) continue;
+        const x = Math.round(this.msToPx(rl.time)) + 0.5;
+        const bpm = Math.round(60000 / rl.beatLength);
+
+        // Distinct Red Line
+        this.ctx.strokeStyle = '#ff3344';
+        this.ctx.lineWidth = 2;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, 0);
+        this.ctx.lineTo(x, rulerH);
+        this.ctx.stroke();
+
+        // Red BPM badge tag
+        const tagText = `${bpm} BPM`;
+        this.ctx.font = 'bold 9px monospace';
+        const textW = this.ctx.measureText(tagText).width;
+
+        this.ctx.fillStyle = 'rgba(239, 68, 68, 0.92)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(x + 2, rulerH - 16, textW + 6, 14, 3);
+        this.ctx.fill();
+
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.fillText(tagText, x + 5, rulerH - 5);
+      }
     }
   }
 
@@ -402,6 +518,31 @@ export class Sequencer {
       this.ctx.fillStyle = '#0f1115';
       this.ctx.fillRect(0, y, width, height - y);
     }
+
+    // Kiai background wash in lane tracks area
+    const viewStartMs = this.scrollLeftMs;
+    const viewEndMs = this.pxToMs(width);
+    for (const kiai of this.kiaiIntervals) {
+      if (kiai.end < viewStartMs || kiai.start > viewEndMs) continue;
+      const startX = Math.max(0, this.msToPx(kiai.start));
+      const endX = Math.min(width, this.msToPx(kiai.end));
+      const w = Math.max(2, endX - startX);
+
+      this.ctx.fillStyle = 'rgba(255, 170, 0, 0.035)';
+      this.ctx.fillRect(startX, this.rulerHeight, w, height - this.rulerHeight);
+
+      // Kiai start vertical dashed marker
+      if (kiai.start >= viewStartMs && kiai.start <= viewEndMs) {
+        this.ctx.strokeStyle = 'rgba(255, 170, 0, 0.45)';
+        this.ctx.lineWidth = 1.5;
+        this.ctx.setLineDash([4, 4]);
+        this.ctx.beginPath();
+        this.ctx.moveTo(startX, this.rulerHeight);
+        this.ctx.lineTo(startX, height);
+        this.ctx.stroke();
+        this.ctx.setLineDash([]);
+      }
+    }
   }
 
   private renderGrid(viewStartMs: number, viewEndMs: number, totalHeight: number) {
@@ -429,6 +570,7 @@ export class Sequencer {
 
       for (let b = startBeat; b <= endBeat; b++) {
         const timeMs = Math.round(rl.time + b * subInterval);
+        if (timeMs >= segmentEndMs) break; // Strictly prevent leaking into next BPM segment
         if (timeMs < viewStartMs || timeMs > viewEndMs) continue;
 
         const x = Math.round(this.msToPx(timeMs)) + 0.5;
@@ -607,6 +749,16 @@ export class Sequencer {
     const thumbW = Math.max(30, (viewDurationMs / totalMs) * width);
     const maxScrollMs = Math.max(0, totalMs - viewDurationMs);
     const thumbX = maxScrollMs > 0 ? (this.scrollLeftMs / maxScrollMs) * (width - thumbW) : 0;
+
+    // Kiai zones on overview scrollbar
+    if (totalMs > 0) {
+      this.ctx.fillStyle = 'rgba(255, 170, 0, 0.45)';
+      for (const kiai of this.kiaiIntervals) {
+        const kX = (kiai.start / totalMs) * width;
+        const kW = Math.max(2, ((kiai.end - kiai.start) / totalMs) * width);
+        this.ctx.fillRect(kX, barY + 2, kW, this.scrollbarHeight - 4);
+      }
+    }
 
     // Thumb
     this.ctx.fillStyle = this.isDraggingScrollbar ? '#4a9eff' : 'rgba(255, 255, 255, 0.28)';

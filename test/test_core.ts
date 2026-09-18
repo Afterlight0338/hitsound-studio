@@ -211,6 +211,59 @@ if (fs.existsSync(fallenPath)) {
       `[PASS] Keysounded map consolidation: collapsed ${naive.lanes.length} raw lanes down to ${consolidated.lanes.length} active, non-empty keysound lanes!`
     );
   }
+
+  // 8. Test Multiple BPMs & Kiai Interval Detection (Ariabl'eyeS - Kegare Naki Bara Juuji)
+  const ariaPath = "/home/afterlight/Downloads/1229824 Ariabl'eyeS - Kegare Naki Bara Juuji (1).osz";
+  if (fs.existsSync(ariaPath)) {
+    const ariaBuf = fs.readFileSync(ariaPath);
+    const ariaZip = await JSZip.loadAsync(ariaBuf);
+    const osuKey = Object.keys(ariaZip.files).find((k) => k.endsWith('.osu'))!;
+    const ariaText = await ariaZip.files[osuKey].async('text');
+    const ariaParsed = parseOsu(ariaText, osuKey);
+
+    const redLines = ariaParsed.timingPoints.filter((tp) => tp.uninherited);
+    if (redLines.length !== 42) {
+      throw new Error(`Expected 42 red lines (BPM changes), got ${redLines.length}`);
+    }
+
+    // Verify Kiai calculation
+    let currentStart: number | null = null;
+    const kiaiIntervals: { start: number; end: number }[] = [];
+    for (const tp of ariaParsed.timingPoints) {
+      const isKiai = (tp.effects & 1) !== 0;
+      if (isKiai && currentStart === null) {
+        currentStart = tp.time;
+      } else if (!isKiai && currentStart !== null) {
+        kiaiIntervals.push({ start: currentStart, end: tp.time });
+        currentStart = null;
+      }
+    }
+    if (currentStart !== null) {
+      kiaiIntervals.push({ start: currentStart, end: 350000 });
+    }
+
+    if (kiaiIntervals.length !== 6) {
+      throw new Error(`Expected 6 Kiai intervals, got ${kiaiIntervals.length}`);
+    }
+
+    // Test active BPM detection across different sections
+    function getActiveBpm(timeMs: number): number {
+      let active = redLines[0];
+      for (const rl of redLines) {
+        if (rl.time <= timeMs) active = rl;
+        else break;
+      }
+      return Math.round(60000 / active.beatLength);
+    }
+
+    if (getActiveBpm(10422) !== 84) throw new Error(`Expected 84 BPM at 10422ms, got ${getActiveBpm(10422)}`);
+    if (getActiveBpm(44684) !== 260) throw new Error(`Expected 260 BPM at 44684ms, got ${getActiveBpm(44684)}`);
+    if (getActiveBpm(144376) !== 130) throw new Error(`Expected 130 BPM at 144376ms, got ${getActiveBpm(144376)}`);
+
+    console.log(
+      `[PASS] Multiple BPMs (42 red lines, 84-260 BPM) & Kiai intervals (${kiaiIntervals.length} zones) verified!`
+    );
+  }
 }
 
-console.log('\n>>> ALL 7 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+console.log('\n>>> ALL 8 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');

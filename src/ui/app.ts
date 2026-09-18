@@ -144,6 +144,8 @@ export class App {
             </button>
             <button id="btn-stop" class="btn btn-secondary" title="Return to start (Home)">⏮</button>
             <div class="time-display" id="time-display">00:00.000</div>
+            <div class="bpm-display" id="bpm-display" title="Active BPM at playhead">120 BPM</div>
+            <div class="kiai-badge" id="kiai-badge" style="display: none;" title="Kiai Time active">🔥 KIAI</div>
 
             <div class="transport-group">
               <label>Rate:</label>
@@ -452,18 +454,32 @@ export class App {
 
   private updateTimeDisplay(ms: number) {
     const disp = document.getElementById('time-display');
-    if (!disp) return;
+    if (disp) {
+      const totalSec = Math.max(0, ms / 1000);
+      const mins = Math.floor(totalSec / 60);
+      const secs = Math.floor(totalSec % 60);
+      const millis = Math.floor(ms % 1000);
 
-    const totalSec = Math.max(0, ms / 1000);
-    const mins = Math.floor(totalSec / 60);
-    const secs = Math.floor(totalSec % 60);
-    const millis = Math.floor(ms % 1000);
+      const mStr = String(mins).padStart(2, '0');
+      const sStr = String(secs).padStart(2, '0');
+      const msStr = String(millis).padStart(3, '0');
 
-    const mStr = String(mins).padStart(2, '0');
-    const sStr = String(secs).padStart(2, '0');
-    const msStr = String(millis).padStart(3, '0');
+      disp.textContent = `${mStr}:${sStr}.${msStr}`;
+    }
 
-    disp.textContent = `${mStr}:${sStr}.${msStr}`;
+    if (this.sequencer) {
+      const bpmDisp = document.getElementById('bpm-display');
+      if (bpmDisp) {
+        const bpm = this.sequencer.getActiveBpm(ms);
+        bpmDisp.textContent = `${bpm} BPM`;
+      }
+
+      const kiaiBadge = document.getElementById('kiai-badge');
+      if (kiaiBadge) {
+        const isKiai = this.sequencer.isKiaiAtTime(ms);
+        kiaiBadge.style.display = isKiai ? 'inline-block' : 'none';
+      }
+    }
   }
 
   // --- DOM & User Events ---
