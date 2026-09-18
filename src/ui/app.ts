@@ -52,6 +52,7 @@ export class App {
     this.initSequencer();
     this.setupGlobalShortcuts();
     this.setupAudioListeners();
+    this.audioEngine.preloadDefaultSamples().catch(() => {});
   }
 
   private initDefaultLanes() {
@@ -910,18 +911,22 @@ export class App {
 
     container.innerHTML = '';
 
+    const hasSolo = this.lanes.some((l) => l.solo);
+
     for (let i = 0; i < this.lanes.length; i++) {
       const lane = this.lanes[i];
       const el = document.createElement('div');
-      el.className = 'lane-item';
+      const isMuted = lane.muted;
+      const isSoloInactive = hasSolo && !lane.solo;
+      el.className = `lane-item${isMuted ? ' is-muted' : ''}${isSoloInactive ? ' is-inactive' : ''}`;
       el.style.borderLeftColor = lane.color;
 
       el.innerHTML = `
         <div class="lane-top-row">
           <input type="text" class="lane-name-input" value="${lane.name}" title="Rename lane">
           <div class="lane-btns">
-            <button class="btn-mute ${lane.muted ? 'active' : ''}" title="Mute">M</button>
-            <button class="btn-solo ${lane.solo ? 'active' : ''}" title="Solo">S</button>
+            <button class="btn-mute ${lane.muted ? 'active' : ''}" title="Mute lane">MUTE</button>
+            <button class="btn-solo ${lane.solo ? 'active' : ''}" title="Solo lane">SOLO</button>
             <button class="btn-play-sample" title="Test sample">🔊</button>
             <button class="btn-del-lane" title="Delete lane">✕</button>
           </div>
@@ -962,14 +967,20 @@ export class App {
       const btnMute = el.querySelector('.btn-mute') as HTMLButtonElement;
       btnMute.addEventListener('click', () => {
         lane.muted = !lane.muted;
-        btnMute.classList.toggle('active', lane.muted);
+        if (lane.muted) {
+          lane.solo = false;
+        }
+        this.renderLanesList();
         this.updateSequencerData();
       });
 
       const btnSolo = el.querySelector('.btn-solo') as HTMLButtonElement;
       btnSolo.addEventListener('click', () => {
         lane.solo = !lane.solo;
-        btnSolo.classList.toggle('active', lane.solo);
+        if (lane.solo) {
+          lane.muted = false;
+        }
+        this.renderLanesList();
         this.updateSequencerData();
       });
 

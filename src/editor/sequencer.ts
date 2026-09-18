@@ -366,21 +366,27 @@ export class Sequencer {
 
   private renderLaneRows(width: number, height: number) {
     let y = this.rulerHeight - this.scrollTopPx;
+    const hasSolo = this.lanes.some((l) => l.solo);
 
     for (let i = 0; i < this.lanes.length; i++) {
       const lane = this.lanes[i];
+      const isInactive = lane.muted || (hasSolo && !lane.solo);
 
       if (y + this.laneHeight > this.rulerHeight && y < height) {
-        // Alternating row background
-        this.ctx.fillStyle = i % 2 === 0 ? '#161922' : '#1a1e28';
+        // Alternating row background (darker if inactive)
+        this.ctx.fillStyle = isInactive
+          ? '#111319'
+          : (i % 2 === 0 ? '#161922' : '#1a1e28');
         this.ctx.fillRect(0, y, width, this.laneHeight);
 
         // Subtle lane accent tint
-        this.ctx.fillStyle = lane.color + '0d';
-        this.ctx.fillRect(0, y, width, this.laneHeight);
+        if (!isInactive) {
+          this.ctx.fillStyle = lane.color + '0d';
+          this.ctx.fillRect(0, y, width, this.laneHeight);
+        }
 
         // Lane bottom divider
-        this.ctx.strokeStyle = '#272d3d';
+        this.ctx.strokeStyle = isInactive ? '#1e2330' : '#272d3d';
         this.ctx.lineWidth = 1;
         this.ctx.beginPath();
         this.ctx.moveTo(0, y + this.laneHeight - 0.5);
@@ -525,6 +531,8 @@ export class Sequencer {
       laneIndexMap.set(this.lanes[i].id, i);
     }
 
+    const hasSolo = this.lanes.some((l) => l.solo);
+
     // Dynamic width with strict margin so notes never overlap in dense streams
     const triggerW = Math.max(6, Math.min(26, this.zoomPxPerSec * 0.035));
 
@@ -535,11 +543,18 @@ export class Sequencer {
       if (lIdx === undefined) continue;
 
       const lane = this.lanes[lIdx];
+      const isInactive = lane.muted || (hasSolo && !lane.solo);
+
       const x = Math.round(this.msToPx(tr.time) - triggerW / 2);
       const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
       const h = this.laneHeight - 12;
 
       const isSelected = this.selectedTriggerIds.has(tr.id);
+
+      this.ctx.save();
+      if (isInactive) {
+        this.ctx.globalAlpha = 0.28;
+      }
 
       // Trigger Block
       this.ctx.fillStyle = lane.color;
@@ -564,6 +579,8 @@ export class Sequencer {
         this.ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
         this.ctx.fillRect(x + 2, y + 2, triggerW - 4, 2);
       }
+
+      this.ctx.restore();
     }
   }
 

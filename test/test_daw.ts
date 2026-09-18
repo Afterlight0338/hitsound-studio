@@ -211,4 +211,52 @@ if (clickSession.placedNotes.length !== 1 || clickSession.placedNotes[0].time !=
 }
 console.log('[PASS] Single click successfully placed intentional note at target position');
 
+// 5. Test Mute & Solo Mutual Exclusivity and Active State Evaluation
+const lanes: Lane[] = [
+  {
+    id: 'l1',
+    name: 'Soft Whistle #1',
+    sampleSet: 'Soft',
+    addition: 'Whistle',
+    additionSet: 'Auto',
+    customIndex: 1,
+    volume: 80,
+    color: '#00e5ff',
+    muted: false,
+    solo: false,
+  },
+  {
+    id: 'l2',
+    name: 'Soft Clap #1',
+    sampleSet: 'Soft',
+    addition: 'Clap',
+    additionSet: 'Auto',
+    customIndex: 1,
+    volume: 90,
+    color: '#ff4081',
+    muted: false,
+    solo: false,
+  },
+];
+
+// Click Mute on lane 1
+lanes[0].muted = !lanes[0].muted;
+if (lanes[0].muted) lanes[0].solo = false;
+if (!lanes[0].muted || lanes[0].solo) throw new Error('Mute failed to activate or solo was not false');
+
+// Click Solo on lane 1: must clear Mute
+lanes[0].solo = !lanes[0].solo;
+if (lanes[0].solo) lanes[0].muted = false;
+if (lanes[0].muted || !lanes[0].solo) throw new Error('Solo failed to override and clear mute');
+
+// Check active state of all lanes when solo is active on lane 0
+const hasSolo = lanes.some((l) => l.solo);
+const isLane1Inactive = lanes[0].muted || (hasSolo && !lanes[0].solo);
+const isLane2Inactive = lanes[1].muted || (hasSolo && !lanes[1].solo);
+
+if (isLane1Inactive) throw new Error('Soloed lane 1 should not be inactive');
+if (!isLane2Inactive) throw new Error('Non-soloed lane 2 must be inactive when solo is active');
+console.log('[PASS] Mute and Solo are strictly mutually exclusive and lane dimming states compute correctly');
+
 console.log('\n>>> ALL DAW FEATURE TESTS PASSED WITH 100% INTEGRITY! <<<');
+

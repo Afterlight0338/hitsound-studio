@@ -25,7 +25,9 @@ export class AudioEngine {
 
   // Custom samples from mapset or user
   private customSamples = new Map<string, AudioBuffer>();
+  private defaultSamples = new Map<string, AudioBuffer>();
   private laneBufferCache = new Map<string, AudioBuffer>();
+  private isPreloadingDefaults = false;
 
   // Dynamic references to active project data
   private currentLanes: Lane[] = [];
@@ -175,8 +177,50 @@ export class AudioEngine {
   }
 
   /**
-   * Resolves sample audio buffer: checks lane.audioBuffer -> custom sample files from map -> null
-   * No synthetic fallback: only real samples from the beatmap or user imports are played.
+   * Preload official osu! standard default skin hitsound samples (/defaults/*.wav).
+   * These act as the authentic baseline when a beatmap (.osz) does not provide custom overrides.
+   */
+  public async preloadDefaultSamples(): Promise<void> {
+    if (this.isPreloadingDefaults || typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    this.isPreloadingDefaults = true;
+
+    const defaultFiles = [
+      'soft-hitnormal.wav',
+      'soft-hitclap.wav',
+      'soft-hitwhistle.wav',
+      'soft-hitfinish.wav',
+      'normal-hitnormal.wav',
+      'normal-hitclap.wav',
+      'normal-hitwhistle.wav',
+      'normal-hitfinish.wav',
+      'drum-hitnormal.wav',
+      'drum-hitclap.wav',
+      'drum-hitwhistle.wav',
+      'drum-hitfinish.wav',
+    ];
+
+    const ctx = this.ensureContext();
+    const baseUrl = ((import.meta as any)?.env?.BASE_URL || '').replace(/\/$/, '');
+    await Promise.all(
+      defaultFiles.map(async (file) => {
+        try {
+          const res = await fetch(`${baseUrl}/defaults/${file}`);
+          if (res.ok) {
+            const buf = await ctx.decodeAudioData(await res.arrayBuffer());
+            this.defaultSamples.set(file, buf);
+          }
+        } catch {
+          // ignore network error
+        }
+      })
+    );
+  }
+
+  /**
+   * Resolves sample audio buffer:
+   * 1. Checks lane.audioBuffer
+   * 2. Checks custom sample files from loaded beatmap (.osz)
+   * 3. Falls back to standard osu! default skin sample (/defaults/*.wav)
    */
   public getSampleBuffer(lane: Lane): AudioBuffer | null {
     if (lane.audioBuffer) return lane.audioBuffer;
@@ -207,12 +251,39 @@ export class AudioEngine {
       searchKeys.push(cleanLaneName, `${cleanLaneName}.wav`, `${cleanLaneName}.ogg`, `${cleanLaneName}.mp3`);
     }
 
+    // 1. Check custom samples provided by mapset
     for (const key of searchKeys) {
       if (this.customSamples.has(key)) {
         const buf = this.customSamples.get(key)!;
         this.laneBufferCache.set(cacheKey, buf);
         return buf;
       }
+    }
+
+    // 2. Fall back to authentic osu! default hitsound sample
+    const defaultKey = `${baseName}.wav`;
+    if (this.defaultSamples.has(defaultKey)) {
+      const buf = this.defaultSamples.get(defaultKey)!;
+      this.laneBufferCache.set(cacheKey, buf);
+      return buf;
+    }
+
+    // Lazy load default if not preloaded yet
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      const baseUrl = ((import.meta as any)?.env?.BASE_URL || '').replace(/\/$/, '');
+      fetch(`${baseUrl}/defaults/${defaultKey}`)
+        .then((res) => {
+          if (!res.ok) return null;
+          return res.arrayBuffer();
+        })
+        .then(async (arr) => {
+          if (arr) {
+            const buf = await this.ensureContext().decodeAudioData(arr);
+            this.defaultSamples.set(defaultKey, buf);
+            this.laneBufferCache.set(cacheKey, buf);
+          }
+        })
+        .catch(() => {});
     }
 
     return null;
