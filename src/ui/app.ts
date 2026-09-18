@@ -1,0 +1,1103 @@
+import JSZip from 'jszip';
+import { AudioEngine } from '../audio/audioEngine';
+import { Sequencer } from '../editor/sequencer';
+import { copyHitsounds } from '../osu/copier';
+import { generateHitsoundBeatmap } from '../osu/hitsoundGenerator';
+import { parseOsu } from '../osu/parser';
+import type {
+  CopierOptions,
+  HitObject,
+  Lane,
+  OsuBeatmap,
+  TimingPoint,
+  Trigger,
+} from '../types';
+
+export class App {
+  private audioEngine: AudioEngine;
+  private sequencer!: Sequencer;
+
+  // Project State
+  private lanes: Lane[] = [];
+  private triggers: Trigger[] = [];
+  private timingPoints: TimingPoint[] = [];
+  private allBeatmaps: OsuBeatmap[] = [];
+  private referenceBeatmap: OsuBeatmap | null = null;
+  private customSamples: Map<string, AudioBuffer> = new Map();
+  private rawZipFiles: Map<string, Uint8Array> = new Map();
+
+  public activeTab: 'studio' | 'copier' = 'studio';
+  private title = 'New Project';
+  private artist = 'Unknown Artist';
+  private creator = 'Mapper';
+  private audioFileName = 'audio.mp3';
+
+  constructor() {
+    this.audioEngine = new AudioEngine();
+    this.initDefaultLanes();
+    this.initDefaultTiming();
+  }
+
+  public init() {
+    this.renderLayout();
+    this.initSequencer();
+    this.setupGlobalShortcuts();
+    this.setupAudioListeners();
+  }
+
+  private initDefaultLanes() {
+    this.lanes = [
+      {
+        id: 'lane-soft-clap',
+        name: 'Soft Clap',
+        sampleSet: 'Soft',
+        addition: 'Clap',
+        additionSet: 'Auto',
+        customIndex: 0,
+        volume: 90,
+        color: '#ff4081',
+        muted: false,
+        solo: false,
+      },
+      {
+        id: 'lane-soft-whistle',
+        name: 'Soft Whistle',
+        sampleSet: 'Soft',
+        addition: 'Whistle',
+        additionSet: 'Auto',
+        customIndex: 0,
+        volume: 80,
+        color: '#00e5ff',
+        muted: false,
+        solo: false,
+      },
+      {
+        id: 'lane-soft-finish',
+        name: 'Soft Finish',
+        sampleSet: 'Soft',
+        addition: 'Finish',
+        additionSet: 'Auto',
+        customIndex: 0,
+        volume: 90,
+        color: '#ffc400',
+        muted: false,
+        solo: false,
+      },
+      {
+        id: 'lane-drum-kick',
+        name: 'Drum Kick',
+        sampleSet: 'Drum',
+        addition: 'None',
+        additionSet: 'Auto',
+        customIndex: 0,
+        volume: 85,
+        color: '#76ff03',
+        muted: false,
+        solo: false,
+      },
+    ];
+  }
+
+  private initDefaultTiming() {
+    // 175 BPM default
+    this.timingPoints = [
+      {
+        time: 0,
+        beatLength: 342.857, // 175 BPM
+        meter: 4,
+        sampleSet: 2,
+        sampleIndex: 0,
+        volume: 100,
+        uninherited: true,
+        effects: 0,
+      },
+    ];
+  }
+
+  // --- Layout & DOM ---
+
+  private renderLayout() {
+    const root = document.getElementById('app')!;
+    root.innerHTML = `
+      <div class="studio-app">
+        <!-- Top Navigation & Transport Bar -->
+        <header class="top-bar">
+          <div class="brand">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">HITSOUND STUDIO</span>
+            <span class="badge">OSU!</span>
+          </div>
+
+          <div class="transport">
+            <button id="btn-play" class="btn btn-primary" title="Play / Pause (Space)">
+              <span id="play-icon">▶</span>
+            </button>
+            <button id="btn-stop" class="btn btn-secondary" title="Return to start (Home)">⏮</button>
+            <div class="time-display" id="time-display">00:00.000</div>
+
+            <div class="transport-group">
+              <label>Rate:</label>
+              <select id="select-rate" class="dropdown">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1.0" selected>1.0x</option>
+              </select>
+            </div>
+
+            <div class="transport-group">
+              <label>Snap:</label>
+              <select id="select-snap" class="dropdown">
+                <option value="1">1/1</option>
+                <option value="2">1/2</option>
+                <option value="4" selected>1/4</option>
+                <option value="3">1/3</option>
+                <option value="6">1/6</option>
+                <option value="8">1/8</option>
+                <option value="12">1/12</option>
+                <option value="16">1/16</option>
+              </select>
+            </div>
+
+            <div class="transport-group">
+              <label>Zoom:</label>
+              <input type="range" id="slider-zoom" min="50" max="400" value="140" class="range-slider">
+            </div>
+
+            <div class="transport-group volumes">
+              <span>🎵</span>
+              <input type="range" id="vol-song" min="0" max="100" value="80" title="Song Volume" class="range-slider mini">
+              <span>🥁</span>
+              <input type="range" id="vol-hs" min="0" max="100" value="90" title="Hitsound Volume" class="range-slider mini">
+            </div>
+          </div>
+
+          <div class="header-actions">
+            <nav class="tabs">
+              <button id="tab-studio" class="tab-btn active">Studio</button>
+              <button id="tab-copier" class="tab-btn">Hitsound Copier</button>
+            </nav>
+
+            <button id="btn-demo" class="btn btn-outline" title="Load demo song and beatmap">Load Demo</button>
+            <label class="btn btn-outline file-btn">
+              Import .osz / .osu
+              <input type="file" id="file-input" accept=".osz,.osu,.mp3,.wav" multiple hidden>
+            </label>
+            <button id="btn-export-diff" class="btn btn-success">Export [Hitsounds].osu</button>
+            <button id="btn-download-osz" class="btn btn-accent" title="Download updated .osz package">Save .osz</button>
+          </div>
+        </header>
+
+        <!-- Main Workspace View -->
+        <main class="main-workspace">
+          <!-- STUDIO VIEW -->
+          <div id="view-studio" class="view-panel active">
+            <!-- Left Channel Rack -->
+            <aside class="channel-rack">
+              <div class="rack-header">
+                <span class="rack-title">LANES (${this.lanes.length})</span>
+                <button id="btn-add-lane" class="btn btn-sm btn-primary">+ Add Lane</button>
+              </div>
+
+              <!-- Reference Difficulty Selector -->
+              <div class="reference-selector">
+                <label>Ghost Map:</label>
+                <select id="select-reference-diff" class="dropdown full-width">
+                  <option value="">None</option>
+                </select>
+              </div>
+
+              <!-- Lane Items Container -->
+              <div id="lanes-list" class="lanes-list"></div>
+            </aside>
+
+            <!-- Sequencer Canvas Area -->
+            <div class="sequencer-container">
+              <canvas id="sequencer-canvas"></canvas>
+            </div>
+          </div>
+
+          <!-- COPIER VIEW -->
+          <div id="view-copier" class="view-panel">
+            <div class="copier-container">
+              <div class="copier-card">
+                <h2>⚡ Built-In Hitsound Copier</h2>
+                <p class="subtitle">
+                  Bake hitsounds from the studio project or a source diff directly into your mapset's difficulties.
+                  <strong>Preserves Slider Velocity (SV)</strong> while transferring additions, custom indices, and volumes.
+                </p>
+
+                <div class="copier-grid">
+                  <!-- Left: Source & Targets -->
+                  <div class="copier-col">
+                    <div class="form-group">
+                      <label>Source Beatmap:</label>
+                      <select id="copier-source" class="dropdown full-width">
+                        <option value="__current__">Current Studio Project ([Hitsounds])</option>
+                      </select>
+                    </div>
+
+                    <div class="form-group">
+                      <div class="flex-between">
+                        <label>Target Difficulties:</label>
+                        <div>
+                          <button id="btn-select-all-diffs" class="btn-link">Select All</button>
+                          <button id="btn-deselect-all-diffs" class="btn-link">None</button>
+                        </div>
+                      </div>
+                      <div id="copier-targets-list" class="checkbox-list">
+                        <div class="empty-state">No other difficulties loaded yet. Import an .osz file.</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Right: Options -->
+                  <div class="copier-col">
+                    <h3>Copy Options</h3>
+                    <div class="form-group inline">
+                      <label>Snap Tolerance:</label>
+                      <input type="number" id="copier-snap" value="5" min="0" max="25" class="input-num">
+                      <span>ms</span>
+                    </div>
+
+                    <div class="options-list">
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-additions" checked>
+                        Copy HitObject Additions (Whistle / Finish / Clap)
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-samplesets" checked>
+                        Copy SampleSets (Soft / Normal / Drum)
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-indices" checked>
+                        Copy Custom Sample Indices
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-volumes" checked>
+                        Copy Volumes & Green Timing Points (preserves target SV)
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-heads" checked>
+                        Copy to Slider Heads
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-repeats" checked>
+                        Copy to Slider Repeat Arrows
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-tails" checked>
+                        Copy to Slider Tails
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-spinners" checked>
+                        Copy to Spinners
+                      </label>
+                      <label class="checkbox-label">
+                        <input type="checkbox" id="opt-clean">
+                        Clean unmatched notes (remove old hitsounds on notes with no match)
+                      </label>
+                    </div>
+
+                    <div class="copier-actions">
+                      <button id="btn-run-copier" class="btn btn-primary btn-lg">Copy Hitsounds & Download .osz</button>
+                      <button id="btn-download-diffs-zip" class="btn btn-secondary btn-lg">Download Updated .osu Files</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Copier Result Console -->
+                <div id="copier-console" class="copier-console"></div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    `;
+
+    this.bindDomEvents();
+    this.renderLanesList();
+  }
+
+  private initSequencer() {
+    const canvas = document.getElementById('sequencer-canvas') as HTMLCanvasElement;
+    this.sequencer = new Sequencer(canvas, {
+      onAddTrigger: (laneId, time) => {
+        const tr: Trigger = {
+          id: `tr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          laneId,
+          time,
+        };
+        this.triggers.push(tr);
+        this.updateSequencerData();
+      },
+      onRemoveTrigger: (triggerId) => {
+        this.triggers = this.triggers.filter((t) => t.id !== triggerId);
+        this.updateSequencerData();
+      },
+      onSeek: (timeMs) => {
+        this.audioEngine.seek(timeMs, this.lanes, this.triggers);
+        this.sequencer.setTime(timeMs);
+        this.updateTimeDisplay(timeMs);
+      },
+      onPreviewSample: (lane) => {
+        this.audioEngine.playSingleSample(lane);
+      },
+    });
+
+    this.updateSequencerData();
+  }
+
+  private updateSequencerData() {
+    const ghostObjects = this.referenceBeatmap ? this.referenceBeatmap.hitObjects : [];
+    this.sequencer.updateData(
+      this.lanes,
+      this.triggers,
+      this.timingPoints,
+      ghostObjects,
+      this.audioEngine.getWaveform()
+    );
+  }
+
+  private setupAudioListeners() {
+    this.audioEngine.onTimeUpdate = (timeMs) => {
+      this.sequencer.setTime(timeMs);
+      this.updateTimeDisplay(timeMs);
+    };
+
+    this.audioEngine.onStateChange = (isPlaying) => {
+      const icon = document.getElementById('play-icon');
+      if (icon) {
+        icon.textContent = isPlaying ? '⏸' : '▶';
+      }
+    };
+  }
+
+  private updateTimeDisplay(ms: number) {
+    const disp = document.getElementById('time-display');
+    if (!disp) return;
+
+    const totalSec = Math.max(0, ms / 1000);
+    const mins = Math.floor(totalSec / 60);
+    const secs = Math.floor(totalSec % 60);
+    const millis = Math.floor(ms % 1000);
+
+    const mStr = String(mins).padStart(2, '0');
+    const sStr = String(secs).padStart(2, '0');
+    const msStr = String(millis).padStart(3, '0');
+
+    disp.textContent = `${mStr}:${sStr}.${msStr}`;
+  }
+
+  // --- DOM & User Events ---
+
+  private bindDomEvents() {
+    // Play/Pause
+    document.getElementById('btn-play')?.addEventListener('click', () => this.togglePlay());
+    document.getElementById('btn-stop')?.addEventListener('click', () => {
+      this.audioEngine.seek(0, this.lanes, this.triggers);
+      this.sequencer.setTime(0);
+      this.updateTimeDisplay(0);
+    });
+
+    // Rate selector
+    document.getElementById('select-rate')?.addEventListener('change', (e) => {
+      const rate = parseFloat((e.target as HTMLSelectElement).value) || 1.0;
+      this.audioEngine.setPlaybackRate(rate);
+    });
+
+    // Snap selector
+    document.getElementById('select-snap')?.addEventListener('change', (e) => {
+      const snap = parseInt((e.target as HTMLSelectElement).value, 10) || 4;
+      this.sequencer.setSnapDivisor(snap);
+    });
+
+    // Zoom slider
+    document.getElementById('slider-zoom')?.addEventListener('input', (e) => {
+      const zoom = parseFloat((e.target as HTMLInputElement).value) || 140;
+      this.sequencer.setZoom(zoom);
+    });
+
+    // Volumes
+    document.getElementById('vol-song')?.addEventListener('input', (e) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10) / 100;
+      this.audioEngine.setSongVolume(val);
+    });
+    document.getElementById('vol-hs')?.addEventListener('input', (e) => {
+      const val = parseInt((e.target as HTMLInputElement).value, 10) / 100;
+      this.audioEngine.setHitsoundVolume(val);
+    });
+
+    // Tabs
+    document.getElementById('tab-studio')?.addEventListener('click', () => this.switchTab('studio'));
+    document.getElementById('tab-copier')?.addEventListener('click', () => this.switchTab('copier'));
+
+    // Add Lane
+    document.getElementById('btn-add-lane')?.addEventListener('click', () => this.addNewLane());
+
+    // File Input
+    const fileInput = document.getElementById('file-input') as HTMLInputElement;
+    fileInput?.addEventListener('change', (e) => {
+      const files = (e.target as HTMLInputElement).files;
+      if (files && files.length > 0) {
+        this.handleFiles(Array.from(files));
+      }
+    });
+
+    // Demo Button
+    document.getElementById('btn-demo')?.addEventListener('click', () => this.loadDemoProject());
+
+    // Export Hitsounds.osu
+    document.getElementById('btn-export-diff')?.addEventListener('click', () => this.exportHitsoundDiff());
+
+    // Download .osz
+    document.getElementById('btn-download-osz')?.addEventListener('click', () => this.downloadFullOsz());
+
+    // Reference Diff selector
+    document.getElementById('select-reference-diff')?.addEventListener('change', (e) => {
+      const ver = (e.target as HTMLSelectElement).value;
+      this.referenceBeatmap = this.allBeatmaps.find((bm) => (bm.metadata.Version || '') === ver) || null;
+      this.updateSequencerData();
+    });
+
+    // Copier buttons
+    document.getElementById('btn-select-all-diffs')?.addEventListener('click', () => {
+      document.querySelectorAll<HTMLInputElement>('.target-diff-cb').forEach((cb) => (cb.checked = true));
+    });
+    document.getElementById('btn-deselect-all-diffs')?.addEventListener('click', () => {
+      document.querySelectorAll<HTMLInputElement>('.target-diff-cb').forEach((cb) => (cb.checked = false));
+    });
+    document.getElementById('btn-run-copier')?.addEventListener('click', () => this.executeCopier(true));
+    document.getElementById('btn-download-diffs-zip')?.addEventListener('click', () => this.executeCopier(false));
+
+    // Drag and Drop support
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+        this.handleFiles(Array.from(e.dataTransfer.files));
+      }
+    });
+  }
+
+  private setupGlobalShortcuts() {
+    window.addEventListener('keydown', (e) => {
+      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'SELECT') {
+        return;
+      }
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        this.togglePlay();
+      } else if (e.code === 'Home') {
+        e.preventDefault();
+        this.audioEngine.seek(0, this.lanes, this.triggers);
+        this.sequencer.setTime(0);
+      } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        e.preventDefault();
+        const cur = this.audioEngine.getCurrentTimeMs();
+        const redLine = this.sequencer.findActiveRedLine(cur);
+        const step = (redLine.beatLength / this.sequencer.activeSnapDivisor) * (e.code === 'ArrowRight' ? 1 : -1);
+        const target = Math.max(0, cur + step);
+        this.audioEngine.seek(target, this.lanes, this.triggers);
+        this.sequencer.setTime(target);
+      } else if (e.key >= '1' && e.key <= '6') {
+        const divisors = [1, 2, 4, 3, 6, 8];
+        const d = divisors[parseInt(e.key, 10) - 1];
+        if (d) {
+          const sel = document.getElementById('select-snap') as HTMLSelectElement;
+          if (sel) sel.value = String(d);
+          this.sequencer.setSnapDivisor(d);
+        }
+      }
+    });
+  }
+
+  private togglePlay() {
+    if (this.audioEngine.isAudioPlaying()) {
+      this.audioEngine.pause();
+    } else {
+      const cur = this.sequencer.currentTimeMs;
+      this.audioEngine.play(cur, this.lanes, this.triggers);
+    }
+  }
+
+  private switchTab(tab: 'studio' | 'copier') {
+    this.activeTab = tab;
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.view-panel').forEach((p) => p.classList.remove('active'));
+
+    if (tab === 'studio') {
+      document.getElementById('tab-studio')?.classList.add('active');
+      document.getElementById('view-studio')?.classList.add('active');
+      this.sequencer.resize();
+    } else {
+      document.getElementById('tab-copier')?.classList.add('active');
+      document.getElementById('view-copier')?.classList.add('active');
+      this.updateCopierTargetsList();
+    }
+  }
+
+  // --- Dynamic Lanes Management ---
+
+  public addNewLane(presetName?: string) {
+    const colors = ['#ff4081', '#00e5ff', '#ffc400', '#76ff03', '#e040fb', '#ff6e40', '#40c4ff', '#b2ff59'];
+    const color = colors[this.lanes.length % colors.length];
+
+    const newLane: Lane = {
+      id: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: presetName || `Lane ${this.lanes.length + 1}`,
+      sampleSet: 'Soft',
+      addition: 'Whistle',
+      additionSet: 'Auto',
+      customIndex: 0,
+      volume: 85,
+      color,
+      muted: false,
+      solo: false,
+    };
+
+    this.lanes.push(newLane);
+    this.renderLanesList();
+    this.updateSequencerData();
+  }
+
+  public removeLane(laneId: string) {
+    if (this.lanes.length <= 1) {
+      alert('Must keep at least 1 lane!');
+      return;
+    }
+    this.lanes = this.lanes.filter((l) => l.id !== laneId);
+    this.triggers = this.triggers.filter((t) => t.laneId !== laneId);
+    this.renderLanesList();
+    this.updateSequencerData();
+  }
+
+  private renderLanesList() {
+    const container = document.getElementById('lanes-list');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    for (let i = 0; i < this.lanes.length; i++) {
+      const lane = this.lanes[i];
+      const el = document.createElement('div');
+      el.className = 'lane-item';
+      el.style.borderLeft = `4px solid ${lane.color}`;
+
+      el.innerHTML = `
+        <div class="lane-top-row">
+          <input type="text" class="lane-name-input" value="${lane.name}" title="Rename lane">
+          <div class="lane-btns">
+            <button class="btn-mute ${lane.muted ? 'active' : ''}" title="Mute">M</button>
+            <button class="btn-solo ${lane.solo ? 'active' : ''}" title="Solo">S</button>
+            <button class="btn-play-sample" title="Test sample">🔊</button>
+            <button class="btn-del-lane" title="Delete lane">✕</button>
+          </div>
+        </div>
+
+        <div class="lane-controls-row">
+          <select class="lane-sampleset dropdown mini">
+            <option value="Soft" ${lane.sampleSet === 'Soft' ? 'selected' : ''}>Soft</option>
+            <option value="Normal" ${lane.sampleSet === 'Normal' ? 'selected' : ''}>Normal</option>
+            <option value="Drum" ${lane.sampleSet === 'Drum' ? 'selected' : ''}>Drum</option>
+          </select>
+
+          <select class="lane-addition dropdown mini">
+            <option value="None" ${lane.addition === 'None' ? 'selected' : ''}>None</option>
+            <option value="Clap" ${lane.addition === 'Clap' ? 'selected' : ''}>Clap</option>
+            <option value="Whistle" ${lane.addition === 'Whistle' ? 'selected' : ''}>Whistle</option>
+            <option value="Finish" ${lane.addition === 'Finish' ? 'selected' : ''}>Finish</option>
+          </select>
+
+          <div class="lane-idx-group" title="Custom sample index (e.g. 1 for soft-hitclap.wav, 2 for soft-hitclap2.wav)">
+            <span>#</span>
+            <input type="number" class="lane-custom-idx" min="0" max="99" value="${lane.customIndex}">
+          </div>
+
+          <div class="lane-vol-group" title="Lane volume: ${lane.volume}%">
+            <span>Vol</span>
+            <input type="range" class="lane-volume range-slider mini" min="0" max="100" value="${lane.volume}">
+          </div>
+        </div>
+      `;
+
+      // Event bindings for this lane
+      const nameInput = el.querySelector('.lane-name-input') as HTMLInputElement;
+      nameInput.addEventListener('input', () => {
+        lane.name = nameInput.value;
+      });
+
+      const btnMute = el.querySelector('.btn-mute') as HTMLButtonElement;
+      btnMute.addEventListener('click', () => {
+        lane.muted = !lane.muted;
+        btnMute.classList.toggle('active', lane.muted);
+        this.updateSequencerData();
+      });
+
+      const btnSolo = el.querySelector('.btn-solo') as HTMLButtonElement;
+      btnSolo.addEventListener('click', () => {
+        lane.solo = !lane.solo;
+        btnSolo.classList.toggle('active', lane.solo);
+        this.updateSequencerData();
+      });
+
+      const btnPlaySample = el.querySelector('.btn-play-sample') as HTMLButtonElement;
+      btnPlaySample.addEventListener('click', () => {
+        this.audioEngine.playSingleSample(lane);
+      });
+
+      const btnDel = el.querySelector('.btn-del-lane') as HTMLButtonElement;
+      btnDel.addEventListener('click', () => {
+        this.removeLane(lane.id);
+      });
+
+      const setSelect = el.querySelector('.lane-sampleset') as HTMLSelectElement;
+      setSelect.addEventListener('change', () => {
+        lane.sampleSet = setSelect.value as any;
+      });
+
+      const addSelect = el.querySelector('.lane-addition') as HTMLSelectElement;
+      addSelect.addEventListener('change', () => {
+        lane.addition = addSelect.value as any;
+      });
+
+      const idxInput = el.querySelector('.lane-custom-idx') as HTMLInputElement;
+      idxInput.addEventListener('change', () => {
+        lane.customIndex = parseInt(idxInput.value, 10) || 0;
+      });
+
+      const volSlider = el.querySelector('.lane-volume') as HTMLInputElement;
+      volSlider.addEventListener('input', () => {
+        lane.volume = parseInt(volSlider.value, 10) || 0;
+      });
+
+      container.appendChild(el);
+    }
+  }
+
+  // --- File Ingestion (.osz, .osu, audio) ---
+
+  public async handleFiles(files: File[]) {
+    for (const file of files) {
+      const lower = file.name.toLowerCase();
+
+      if (lower.endsWith('.osz') || lower.endsWith('.zip')) {
+        await this.loadOsz(file);
+      } else if (lower.endsWith('.osu')) {
+        const text = await file.text();
+        const parsed = parseOsu(text, file.name);
+        this.addBeatmap(parsed);
+      } else if (lower.endsWith('.mp3') || lower.endsWith('.ogg') || lower.endsWith('.wav')) {
+        if (lower.includes('hit') || lower.includes('clap') || lower.includes('whistle') || lower.includes('finish')) {
+          // Custom hitsound sample
+          const buf = await this.audioEngine.decodeAudio(await file.arrayBuffer());
+          this.customSamples.set(file.name, buf);
+        } else {
+          // Main song audio
+          await this.loadSongAudio(file);
+        }
+      }
+    }
+  }
+
+  public async loadOsz(file: File) {
+    const zip = await JSZip.loadAsync(file);
+    this.rawZipFiles.clear();
+    this.allBeatmaps = [];
+
+    // First, cache all files
+    for (const [filename, zipEntry] of Object.entries(zip.files)) {
+      if (!zipEntry.dir) {
+        const bytes = await zipEntry.async('uint8array');
+        this.rawZipFiles.set(filename, bytes);
+      }
+    }
+
+    // Parse all .osu files
+    for (const [filename, bytes] of this.rawZipFiles.entries()) {
+      if (filename.toLowerCase().endsWith('.osu')) {
+        const text = new TextDecoder('utf-8').decode(bytes);
+        const parsed = parseOsu(text, filename);
+        this.addBeatmap(parsed);
+      }
+    }
+
+    // Identify main song audio
+    let audioName = 'audio.mp3';
+    if (this.allBeatmaps.length > 0) {
+      audioName = this.allBeatmaps[0].general.AudioFilename || 'audio.mp3';
+    }
+
+    // Find audio file in zip
+    for (const [filename, bytes] of this.rawZipFiles.entries()) {
+      if (filename.toLowerCase() === audioName.toLowerCase()) {
+        await this.audioEngine.decodeAudio(bytes.buffer as ArrayBuffer);
+        this.audioFileName = filename;
+        break;
+      }
+    }
+
+    // Check for custom sample wav files in zip
+    for (const [filename, bytes] of this.rawZipFiles.entries()) {
+      if (filename.toLowerCase().endsWith('.wav')) {
+        try {
+          const sampleBuffer = await this.audioEngine.decodeAudio(bytes.buffer as ArrayBuffer);
+          this.customSamples.set(filename.toLowerCase(), sampleBuffer);
+        } catch {
+          // Ignore invalid wav
+        }
+      }
+    }
+
+    this.updateBeatmapSelectors();
+    this.updateSequencerData();
+    alert(`Loaded mapset with ${this.allBeatmaps.length} difficulties and audio!`);
+  }
+
+  private async loadSongAudio(file: File) {
+    const arrayBuffer = await file.arrayBuffer();
+    await this.audioEngine.decodeAudio(arrayBuffer);
+    this.audioFileName = file.name;
+    this.updateSequencerData();
+  }
+
+  private addBeatmap(bm: OsuBeatmap) {
+    this.allBeatmaps.push(bm);
+
+    if (!this.referenceBeatmap) {
+      this.referenceBeatmap = bm;
+      this.timingPoints = bm.timingPoints.length > 0 ? bm.timingPoints : this.timingPoints;
+      this.title = bm.metadata.Title || 'Project';
+      this.artist = bm.metadata.Artist || 'Artist';
+      this.creator = bm.metadata.Creator || 'Mapper';
+    }
+
+    this.updateBeatmapSelectors();
+  }
+
+  private updateBeatmapSelectors() {
+    const refSelect = document.getElementById('select-reference-diff') as HTMLSelectElement;
+    if (refSelect) {
+      refSelect.innerHTML = '<option value="">None</option>';
+      for (const bm of this.allBeatmaps) {
+        const opt = document.createElement('option');
+        opt.value = bm.metadata.Version || bm.fileName;
+        opt.textContent = bm.metadata.Version || bm.fileName;
+        if (this.referenceBeatmap && this.referenceBeatmap.fileName === bm.fileName) {
+          opt.selected = true;
+        }
+        refSelect.appendChild(opt);
+      }
+    }
+
+    this.updateCopierTargetsList();
+  }
+
+  private updateCopierTargetsList() {
+    const container = document.getElementById('copier-targets-list');
+    if (!container) return;
+
+    if (this.allBeatmaps.length === 0) {
+      container.innerHTML = '<div class="empty-state">No other difficulties loaded yet. Import an .osz file.</div>';
+      return;
+    }
+
+    container.innerHTML = '';
+    for (const bm of this.allBeatmaps) {
+      const ver = bm.metadata.Version || bm.fileName;
+      const row = document.createElement('label');
+      row.className = 'checkbox-label target-row';
+      row.innerHTML = `
+        <input type="checkbox" class="target-diff-cb" value="${bm.fileName}" checked>
+        <span><strong>${ver}</strong> (${bm.hitObjects.length} objects)</span>
+      `;
+      container.appendChild(row);
+    }
+  }
+
+  // --- Exporting & Copier Execution ---
+
+  public getBaseBeatmap(): OsuBeatmap {
+    if (this.referenceBeatmap) return this.referenceBeatmap;
+    if (this.allBeatmaps.length > 0) return this.allBeatmaps[0];
+
+    // Minimal fallback
+    return {
+      version: 14,
+      general: { AudioFilename: this.audioFileName, SampleSet: 'Soft', Mode: '0' },
+      editor: { BeatDivisor: '4', GridSize: '16', TimelineZoom: '2' },
+      metadata: { Title: this.title, Artist: this.artist, Creator: this.creator, Version: 'Hitsounds' },
+      difficulty: { HPDrainRate: '5', CircleSize: '4', OverallDifficulty: '5', ApproachRate: '9', SliderMultiplier: '1.4', SliderTickRate: '1' },
+      events: [],
+      timingPoints: this.timingPoints,
+      colours: {},
+      hitObjects: [],
+      rawText: '',
+      fileName: 'Hitsounds.osu',
+    };
+  }
+
+  public exportHitsoundDiff() {
+    const base = this.getBaseBeatmap();
+    const result = generateHitsoundBeatmap(this.lanes, this.triggers, base, 'Hitsounds');
+
+    const blob = new Blob([result.osuString], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = result.beatmap.fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    alert(`Exported [Hitsounds].osu with ${result.totalNotes} hitsound notes placed at (256, 192)!`);
+  }
+
+  public async executeCopier(saveAsOsz: boolean) {
+    const consoleEl = document.getElementById('copier-console')!;
+    consoleEl.style.display = 'block';
+    consoleEl.innerHTML = '<div class="log-line">Running Hitsound Copier...</div>';
+
+    // 1. Prepare Source Beatmap
+    const sourceResult = generateHitsoundBeatmap(this.lanes, this.triggers, this.getBaseBeatmap(), 'Hitsounds');
+    const sourceBeatmap = sourceResult.beatmap;
+
+    // 2. Collect selected target diffs
+    const selectedFileNames = new Set<string>();
+    document.querySelectorAll<HTMLInputElement>('.target-diff-cb:checked').forEach((cb) => {
+      selectedFileNames.add(cb.value);
+    });
+
+    const targetBeatmaps = this.allBeatmaps.filter((bm) => selectedFileNames.has(bm.fileName));
+
+    if (targetBeatmaps.length === 0) {
+      consoleEl.innerHTML += '<div class="log-line error">❌ No target difficulties selected!</div>';
+      return;
+    }
+
+    // 3. Collect options
+    const options: CopierOptions = {
+      snapToleranceMs: parseInt((document.getElementById('copier-snap') as HTMLInputElement).value, 10) || 5,
+      copyAdditions: (document.getElementById('opt-additions') as HTMLInputElement).checked,
+      copySampleSets: (document.getElementById('opt-samplesets') as HTMLInputElement).checked,
+      copyCustomIndices: (document.getElementById('opt-indices') as HTMLInputElement).checked,
+      copyVolumes: (document.getElementById('opt-volumes') as HTMLInputElement).checked,
+      copyToSliderHeads: (document.getElementById('opt-heads') as HTMLInputElement).checked,
+      copyToSliderRepeats: (document.getElementById('opt-repeats') as HTMLInputElement).checked,
+      copyToSliderTails: (document.getElementById('opt-tails') as HTMLInputElement).checked,
+      copyToSpinners: (document.getElementById('opt-spinners') as HTMLInputElement).checked,
+      cleanExistingAdditions: (document.getElementById('opt-clean') as HTMLInputElement).checked,
+    };
+
+    const results = copyHitsounds(sourceBeatmap, targetBeatmaps, options);
+
+    for (const res of results) {
+      consoleEl.innerHTML += `
+        <div class="log-line success">
+          ✔ <strong>${res.version}</strong>: Matched ${res.stats.matchedObjects}/${res.stats.totalObjects} objects 
+          (${res.stats.sliderEdgesMatched} slider edges), merged ${res.stats.timingPointsMerged} timing points.
+        </div>
+      `;
+    }
+
+    // 4. Package output
+    if (saveAsOsz) {
+      const zip = new JSZip();
+
+      // Copy existing files
+      for (const [fname, bytes] of this.rawZipFiles.entries()) {
+        zip.file(fname, bytes);
+      }
+
+      // Add Hitsounds diff
+      zip.file(sourceBeatmap.fileName, sourceResult.osuString);
+
+      // Overwrite target diffs
+      for (const res of results) {
+        zip.file(res.fileName, res.osuString);
+      }
+
+      consoleEl.innerHTML += '<div class="log-line">Generating .osz archive...</div>';
+      const oszBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(oszBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${this.artist} - ${this.title}.osz`;
+      a.click();
+      URL.revokeObjectURL(url);
+      consoleEl.innerHTML += '<div class="log-line success">🎉 Done! Downloaded updated .osz archive.</div>';
+    } else {
+      // Download individual diffs as a zip
+      const zip = new JSZip();
+      zip.file(sourceBeatmap.fileName, sourceResult.osuString);
+      for (const res of results) {
+        zip.file(res.fileName, res.osuString);
+      }
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hitsounded_diffs.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      consoleEl.innerHTML += '<div class="log-line success">🎉 Done! Downloaded zip with updated .osu diffs.</div>';
+    }
+  }
+
+  public async downloadFullOsz() {
+    await this.executeCopier(true);
+  }
+
+  // --- Built-in Demo Generator ---
+
+  public loadDemoProject() {
+    // Generate a lively 175 BPM demo song procedurally into WebAudio!
+    const ctx = this.audioEngine.getContext();
+    const sampleRate = ctx.sampleRate;
+    const duration = 24; // 24 seconds demo loop
+    const songBuf = ctx.createBuffer(2, Math.floor(sampleRate * duration), sampleRate);
+
+    const left = songBuf.getChannelData(0);
+    const right = songBuf.getChannelData(1);
+
+    const bpm = 175;
+    const beatSec = 60 / bpm;
+
+    // Synthesize a rhythmic synth-pop / anime progression (Em - C - G - D)
+    const chords = [
+      [164.81, 196.0, 246.94], // Em
+      [130.81, 164.81, 196.0],  // C
+      [196.0, 246.94, 293.66],  // G
+      [146.83, 185.0, 220.0],   // D
+    ];
+
+    for (let i = 0; i < left.length; i++) {
+      const t = i / sampleRate;
+      const beatIdx = Math.floor(t / beatSec);
+      const chordIdx = Math.floor(beatIdx / 4) % chords.length;
+      const chord = chords[chordIdx];
+
+      // Bass arp
+      const arpNote = chord[beatIdx % 3] / 2;
+      const bassEnv = Math.exp(-(t % (beatSec / 2)) * 12);
+      const bass = Math.sin(2 * Math.PI * arpNote * t) * bassEnv * 0.4;
+
+      // Chord pad
+      let pad = 0;
+      for (const note of chord) {
+        pad += Math.sin(2 * Math.PI * note * t) * 0.08;
+      }
+
+      // Drum groove (Kick on 1 & 3, Snare on 2 & 4)
+      const beatPhase = (t % beatSec) / beatSec;
+      const isKickBeat = beatIdx % 2 === 0;
+      const isSnareBeat = beatIdx % 2 === 1;
+
+      let drum = 0;
+      if (isKickBeat) {
+        const kEnv = Math.exp(-beatPhase * 18);
+        drum += Math.sin(2 * Math.PI * (60 + 90 * kEnv) * t) * kEnv * 0.6;
+      }
+      if (isSnareBeat) {
+        const sEnv = Math.exp(-beatPhase * 15);
+        drum += (Math.random() * 2 - 1) * sEnv * 0.4;
+      }
+
+      const total = (bass + pad + drum) * 0.6;
+      left[i] = total;
+      right[i] = total;
+    }
+
+    this.audioEngine.setSongBuffer(songBuf);
+
+    this.timingPoints = [
+      {
+        time: 0,
+        beatLength: (60 / bpm) * 1000, // 342.857ms
+        meter: 4,
+        sampleSet: 2,
+        sampleIndex: 0,
+        volume: 100,
+        uninherited: true,
+        effects: 0,
+      },
+    ];
+
+    // Create a demo reference beatmap with standard jump circles and sliders
+    const demoHitObjects: HitObject[] = [];
+    const beatMs = (60 / bpm) * 1000;
+
+    for (let b = 0; b < 64; b++) {
+      const time = Math.round(b * beatMs);
+      if (b % 4 === 2) {
+        // Slider
+        demoHitObjects.push({
+          x: 200 + (b % 8) * 20,
+          y: 150 + (b % 4) * 20,
+          time,
+          type: 2,
+          hitSound: 0,
+          slides: 1,
+          length: 120,
+          endTime: time + Math.round(beatMs),
+          rawString: '',
+        });
+      } else {
+        // Circle
+        demoHitObjects.push({
+          x: 100 + (b % 8) * 35,
+          y: 120 + (b % 6) * 30,
+          time,
+          type: 1,
+          hitSound: 0,
+          rawString: '',
+        });
+      }
+    }
+
+    const demoBeatmap: OsuBeatmap = {
+      version: 14,
+      general: { AudioFilename: 'audio.mp3', SampleSet: 'Soft', Mode: '0' },
+      editor: { BeatDivisor: '4', GridSize: '16', TimelineZoom: '2' },
+      metadata: { Title: 'Hitsound Studio Theme', Artist: 'Antigravity', Creator: 'Mappers', Version: 'Expert' },
+      difficulty: { HPDrainRate: '5', CircleSize: '4', OverallDifficulty: '8', ApproachRate: '9', SliderMultiplier: '1.4', SliderTickRate: '1' },
+      events: [],
+      timingPoints: this.timingPoints,
+      colours: {},
+      hitObjects: demoHitObjects,
+      rawText: '',
+      fileName: 'Antigravity - Hitsound Studio Theme (Mappers) [Expert].osu',
+    };
+
+    const normalBeatmap: OsuBeatmap = {
+      ...demoBeatmap,
+      metadata: { ...demoBeatmap.metadata, Version: 'Normal' },
+      hitObjects: demoHitObjects.filter((_, idx) => idx % 2 === 0),
+      fileName: 'Antigravity - Hitsound Studio Theme (Mappers) [Normal].osu',
+    };
+
+    this.allBeatmaps = [demoBeatmap, normalBeatmap];
+    this.referenceBeatmap = demoBeatmap;
+
+    // Place initial sample triggers (Clap on 2 & 4, Kick on 1 & 3, Whistle on melody)
+    this.triggers = [];
+    const clapLane = this.lanes.find((l) => l.addition === 'Clap') || this.lanes[0];
+    const kickLane = this.lanes.find((l) => l.name.includes('Kick')) || this.lanes[3];
+    const whistleLane = this.lanes.find((l) => l.addition === 'Whistle') || this.lanes[1];
+
+    for (let b = 0; b < 32; b++) {
+      const t = Math.round(b * beatMs);
+      if (b % 2 === 0) {
+        this.triggers.push({ id: `tr-k-${b}`, laneId: kickLane.id, time: t });
+      } else {
+        this.triggers.push({ id: `tr-c-${b}`, laneId: clapLane.id, time: t });
+      }
+      if (b % 4 === 0) {
+        this.triggers.push({ id: `tr-w-${b}`, laneId: whistleLane.id, time: t });
+      }
+    }
+
+    this.updateBeatmapSelectors();
+    this.updateSequencerData();
+    alert('Demo loaded! Press Space to Play, place or remove triggers on the grid, and test the Copier.');
+  }
+}
