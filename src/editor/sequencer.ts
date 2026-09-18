@@ -31,6 +31,7 @@ export class Sequencer {
   public currentTimeMs = 0;
   public activeSnapDivisor = 4; // 1/4 default
   public followPlayhead = true;
+  public showGhostNotes = true;
 
   // Selection & Mouse States
   public selectedTriggerIds = new Set<string>();
@@ -109,6 +110,14 @@ export class Sequencer {
 
   public setZoom(zoom: number) {
     this.zoomPxPerSec = Math.max(40, Math.min(600, zoom));
+    this.render();
+  }
+
+  public resetView() {
+    this.currentTimeMs = 0;
+    this.scrollLeftMs = 0;
+    this.scrollTopPx = 0;
+    this.selectedTriggerIds.clear();
     this.render();
   }
 
@@ -376,36 +385,68 @@ export class Sequencer {
   }
 
   private renderGhostObjects(viewStartMs: number, viewEndMs: number) {
-    if (this.ghostHitObjects.length === 0) return;
+    if (!this.showGhostNotes || this.ghostHitObjects.length === 0) return;
 
     const totalLanesHeight = this.lanes.length * this.laneHeight;
     const baseY = this.rulerHeight - this.scrollTopPx;
+    const topMarkerY = this.rulerHeight + 8;
 
     for (const ho of this.ghostHitObjects) {
       if (ho.time < viewStartMs - 2000 || ho.time > viewEndMs + 2000) continue;
 
-      const x = this.msToPx(ho.time);
+      const x = Math.round(this.msToPx(ho.time)) + 0.5;
       const isCircle = (ho.type & 1) !== 0;
       const isSlider = (ho.type & 2) !== 0;
+      const isSpinner = (ho.type & 8) !== 0;
 
       if (isCircle) {
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
-        this.ctx.fillRect(x - 2, baseY, 4, totalLanesHeight);
+        // Thin elegant vertical guideline through lanes
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, baseY);
+        this.ctx.lineTo(x, baseY + totalLanesHeight);
+        this.ctx.stroke();
 
-        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-        this.ctx.lineWidth = 1.5;
-        this.ctx.strokeRect(x - 5, baseY + 2, 10, totalLanesHeight - 4);
+        // Subtle circular pip at top of grid
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+        this.ctx.beginPath();
+        this.ctx.arc(x, topMarkerY, 3, 0, Math.PI * 2);
+        this.ctx.fill();
       } else if (isSlider) {
         const endTime = ho.endTime || ho.time + 300;
-        const endX = this.msToPx(endTime);
-        const w = Math.max(6, endX - x);
+        const endX = Math.round(this.msToPx(endTime)) + 0.5;
+        const w = Math.max(4, endX - x);
 
-        this.ctx.fillStyle = 'rgba(120, 170, 255, 0.06)';
+        // Very soft background span wash
+        this.ctx.fillStyle = 'rgba(74, 158, 255, 0.04)';
         this.ctx.fillRect(x, baseY, w, totalLanesHeight);
 
-        this.ctx.strokeStyle = 'rgba(120, 170, 255, 0.3)';
+        // Head and tail guidelines
+        this.ctx.strokeStyle = 'rgba(74, 158, 255, 0.2)';
         this.ctx.lineWidth = 1;
-        this.ctx.strokeRect(x, baseY, w, totalLanesHeight);
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, baseY);
+        this.ctx.lineTo(x, baseY + totalLanesHeight);
+        this.ctx.moveTo(endX, baseY);
+        this.ctx.lineTo(endX, baseY + totalLanesHeight);
+        this.ctx.stroke();
+
+        // Compact pill at top of grid
+        this.ctx.fillStyle = 'rgba(74, 158, 255, 0.55)';
+        this.ctx.beginPath();
+        this.ctx.roundRect(x, topMarkerY - 3, w, 6, 3);
+        this.ctx.fill();
+      } else if (isSpinner) {
+        const endTime = ho.endTime || ho.time + 1000;
+        const endX = Math.round(this.msToPx(endTime)) + 0.5;
+        const w = Math.max(4, endX - x);
+
+        this.ctx.fillStyle = 'rgba(230, 64, 255, 0.03)';
+        this.ctx.fillRect(x, baseY, w, totalLanesHeight);
+
+        this.ctx.fillStyle = 'rgba(230, 64, 255, 0.5)';
+        this.ctx.fillRect(x, topMarkerY - 2, w, 4);
       }
     }
   }

@@ -178,6 +178,7 @@ export class App {
               <button id="tab-copier" class="tab-btn">Hitsound Copier</button>
             </nav>
 
+            <button id="btn-reset" class="btn btn-outline" title="Reset all and start fresh">🔄 Reset</button>
             <button id="btn-demo" class="btn btn-outline" title="Load demo song and beatmap">Load Demo</button>
             <label class="btn btn-outline file-btn">
               Import .osz / .osu
@@ -205,6 +206,7 @@ export class App {
                   <select id="select-reference-diff" class="dropdown" style="flex:1">
                     <option value="">None</option>
                   </select>
+                  <button id="btn-toggle-ghost" class="btn btn-sm btn-outline active" title="Toggle ghost notes visibility (G)">👁</button>
                   <button id="btn-import-hs-diff" class="btn btn-sm btn-outline" title="Convert an existing diff into editable lanes">📥 From Diff</button>
                 </div>
               </div>
@@ -467,6 +469,13 @@ export class App {
       }
     });
 
+    // Reset Button
+    document.getElementById('btn-reset')?.addEventListener('click', () => {
+      if (confirm('Reset project and clear all loaded data?')) {
+        this.resetProject();
+      }
+    });
+
     // Demo Button
     document.getElementById('btn-demo')?.addEventListener('click', () => this.loadDemoProject());
 
@@ -475,6 +484,14 @@ export class App {
 
     // Download .osz
     document.getElementById('btn-download-osz')?.addEventListener('click', () => this.downloadFullOsz());
+
+    // Toggle Ghost Notes Button
+    const btnGhost = document.getElementById('btn-toggle-ghost');
+    btnGhost?.addEventListener('click', () => {
+      this.sequencer.showGhostNotes = !this.sequencer.showGhostNotes;
+      btnGhost.classList.toggle('active', this.sequencer.showGhostNotes);
+      this.sequencer.render();
+    });
 
     // Reference Diff selector
     document.getElementById('select-reference-diff')?.addEventListener('change', (e) => {
@@ -486,11 +503,21 @@ export class App {
     // Import from Diff button
     document.getElementById('btn-import-hs-diff')?.addEventListener('click', () => {
       if (this.allBeatmaps.length === 0) {
-        alert('No difficulties loaded. Import a beatmap or .osz file first!');
+        alert('No difficulties loaded. Import an .osz or .osu file first!');
         return;
       }
-      const targetBm = this.referenceBeatmap || this.allBeatmaps[0];
-      this.importDiffIntoLanes(targetBm);
+      if (this.allBeatmaps.length === 1) {
+        this.importDiffIntoLanes(this.allBeatmaps[0], true);
+        return;
+      }
+      const list = this.allBeatmaps.map((bm, i) => `${i + 1}. [${bm.metadata.Version || bm.fileName}] (${bm.hitObjects.length} notes)`).join('\n');
+      const pick = prompt(`Select difficulty number to extract hitsounds from:\n\n${list}`, '1');
+      if (pick) {
+        const idx = parseInt(pick, 10) - 1;
+        if (idx >= 0 && idx < this.allBeatmaps.length) {
+          this.importDiffIntoLanes(this.allBeatmaps[idx], true);
+        }
+      }
     });
 
     // Copier buttons
@@ -542,6 +569,12 @@ export class App {
           if (sel) sel.value = String(d);
           this.sequencer.setSnapDivisor(d);
         }
+      } else if (e.key === 'g' || e.key === 'G') {
+        e.preventDefault();
+        this.sequencer.showGhostNotes = !this.sequencer.showGhostNotes;
+        const btnGhost = document.getElementById('btn-toggle-ghost');
+        btnGhost?.classList.toggle('active', this.sequencer.showGhostNotes);
+        this.sequencer.render();
       }
     });
   }
@@ -717,10 +750,10 @@ export class App {
 
   // --- Convert Existing Hitsound Diff into Lanes ---
 
-  public importDiffIntoLanes(beatmap: OsuBeatmap) {
+  public importDiffIntoLanes(beatmap: OsuBeatmap, showAlert: boolean = true) {
     const res = importHitsoundsFromBeatmap(beatmap);
     if (res.lanes.length === 0) {
-      alert('No hitsound notes found in selected difficulty.');
+      if (showAlert) alert('No hitsound notes found in selected difficulty.');
       return;
     }
 
@@ -728,7 +761,46 @@ export class App {
     this.triggers = res.triggers;
     this.renderLanesList();
     this.updateSequencerData();
-    alert(`Imported ${res.lanes.length} lanes and ${res.importedNoteCount} hitsound triggers from [${beatmap.metadata.Version || 'Diff'}]!`);
+    if (showAlert) {
+      alert(`Imported ${res.lanes.length} lanes and ${res.importedNoteCount} hitsound triggers from [${beatmap.metadata.Version || 'Diff'}]!`);
+    }
+  }
+
+  // --- Reset All Project State ---
+
+  public resetProject() {
+    if (this.audioEngine.isAudioPlaying()) {
+      this.audioEngine.pause();
+    }
+    this.audioEngine.seek(0, [], []);
+    this.audioEngine.clear();
+
+    this.rawZipFiles.clear();
+    this.allBeatmaps = [];
+    this.referenceBeatmap = null;
+    this.customSamples.clear();
+
+    this.title = 'New Project';
+    this.artist = 'Unknown Artist';
+    this.creator = 'Mapper';
+    this.audioFileName = 'audio.mp3';
+
+    this.initDefaultLanes();
+    this.initDefaultTiming();
+    this.triggers = [];
+
+    // Clear file inputs so re-importing the same file works
+    const fileInput = document.getElementById('file-input') as HTMLInputElement;
+    if (fileInput) fileInput.value = '';
+
+    this.renderLanesList();
+    this.updateBeatmapSelectors();
+    this.sequencer.resetView();
+    this.updateSequencerData();
+    this.updateTimeDisplay(0);
+
+    const playIcon = document.getElementById('play-icon');
+    if (playIcon) playIcon.textContent = '▶';
   }
 
   // --- File Ingestion (.osz, .osu, audio) ---
@@ -743,6 +815,10 @@ export class App {
         const text = await file.text();
         const parsed = parseOsu(text, file.name);
         this.addBeatmap(parsed);
+        const isHs = (parsed.metadata.Version || '').toLowerCase().includes('hitsound') || (parsed.metadata.Version || '').toLowerCase() === 'hs';
+        if (isHs || this.triggers.length === 0) {
+          this.importDiffIntoLanes(parsed, false);
+        }
       } else if (lower.endsWith('.mp3') || lower.endsWith('.ogg') || lower.endsWith('.wav')) {
         if (lower.includes('hit') || lower.includes('clap') || lower.includes('whistle') || lower.includes('finish') || lower.includes('slider')) {
           try {
@@ -782,16 +858,17 @@ export class App {
         if (filename.toLowerCase().endsWith('.osu')) {
           const text = new TextDecoder('utf-8').decode(bytes);
           const parsed = parseOsu(text, filename);
-          this.addBeatmap(parsed);
+          this.allBeatmaps.push(parsed);
         }
       }
 
-      // 3. Find and decode main song audio
-      let audioName = 'audio.mp3';
-      if (this.allBeatmaps.length > 0) {
-        audioName = this.allBeatmaps[0].general.AudioFilename || 'audio.mp3';
+      if (this.allBeatmaps.length === 0) {
+        alert('No .osu beatmap files found in the archive!');
+        return;
       }
 
+      // 3. Find and decode main song audio
+      let audioName = this.allBeatmaps[0].general.AudioFilename || 'audio.mp3';
       let foundSong = false;
       for (const [filename, bytes] of this.rawZipFiles.entries()) {
         if (filename.toLowerCase() === audioName.toLowerCase()) {
@@ -832,22 +909,39 @@ export class App {
       }
       this.audioEngine.setCustomSamples(this.customSamples);
 
-      this.updateBeatmapSelectors();
-      this.updateSequencerData();
-
-      // 5. Check if there is an existing [Hitsounds] diff to auto-import
+      // 5. Intelligent Separation & Ghost setup:
       const hsDiff = this.allBeatmaps.find(
         (bm) => (bm.metadata.Version || '').toLowerCase().includes('hitsound') || (bm.metadata.Version || '').toLowerCase() === 'hs'
       );
 
+      // Playable diffs (excluding hitsound diff)
+      const playableDiffs = this.allBeatmaps.filter(
+        (bm) => !(bm.metadata.Version || '').toLowerCase().includes('hitsound') && (bm.metadata.Version || '').toLowerCase() !== 'hs'
+      );
+      playableDiffs.sort((a, b) => b.hitObjects.length - a.hitObjects.length);
+
       if (hsDiff) {
-        const doImport = confirm(`Found existing hitsound difficulty: "${hsDiff.metadata.Version}" (${hsDiff.hitObjects.length} notes).\n\nDo you want to import its hitsounds into studio lanes?`);
-        if (doImport) {
-          this.importDiffIntoLanes(hsDiff);
-        }
+        // Automatically import hitsound diff straight into lanes (no confirm prompt)
+        this.importDiffIntoLanes(hsDiff, false);
+        // Default ghost notes to top playable diff
+        this.referenceBeatmap = playableDiffs[0] || hsDiff;
       } else {
-        alert(`Loaded mapset with ${this.allBeatmaps.length} difficulties!`);
+        // Mapset without hitsound diff (like Fallen Symphony) -> auto-separate top diff into lanes!
+        const topDiff = playableDiffs[0] || this.allBeatmaps[0];
+        this.referenceBeatmap = topDiff;
+        this.importDiffIntoLanes(topDiff, false);
       }
+
+      // Sync metadata & timing from reference diff
+      if (this.referenceBeatmap) {
+        this.timingPoints = this.referenceBeatmap.timingPoints.length > 0 ? this.referenceBeatmap.timingPoints : this.timingPoints;
+        this.title = this.referenceBeatmap.metadata.Title || this.title;
+        this.artist = this.referenceBeatmap.metadata.Artist || this.artist;
+        this.creator = this.referenceBeatmap.metadata.Creator || this.creator;
+      }
+
+      this.updateBeatmapSelectors();
+      this.updateSequencerData();
     } catch (err) {
       console.error('Error importing .osz:', err);
       alert(`Failed to import .osz: ${err}`);
@@ -879,11 +973,17 @@ export class App {
     const refSelect = document.getElementById('select-reference-diff') as HTMLSelectElement;
     if (refSelect) {
       refSelect.innerHTML = '<option value="">None</option>';
-      for (const bm of this.allBeatmaps) {
+      const playables = this.allBeatmaps.filter(
+        (bm) => !(bm.metadata.Version || '').toLowerCase().includes('hitsound') && (bm.metadata.Version || '').toLowerCase() !== 'hs'
+      );
+      const diffsToShow = playables.length > 0 ? playables : this.allBeatmaps;
+
+      for (const bm of diffsToShow) {
         const opt = document.createElement('option');
-        opt.value = bm.metadata.Version || bm.fileName;
-        opt.textContent = bm.metadata.Version || bm.fileName;
-        if (this.referenceBeatmap && this.referenceBeatmap.fileName === bm.fileName) {
+        const ver = bm.metadata.Version || bm.fileName;
+        opt.value = ver;
+        opt.textContent = `${ver} (${bm.hitObjects.length} notes)`;
+        if (this.referenceBeatmap && (this.referenceBeatmap.metadata.Version || this.referenceBeatmap.fileName) === ver) {
           opt.selected = true;
         }
         refSelect.appendChild(opt);

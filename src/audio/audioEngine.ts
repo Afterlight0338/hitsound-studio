@@ -99,9 +99,35 @@ export class AudioEngine {
     this.customSamples = samples;
   }
 
-  public setSongBuffer(buffer: AudioBuffer) {
+  public setSongBuffer(buffer: AudioBuffer | null) {
     this.songBuffer = buffer;
-    this.computeWaveform(buffer);
+    if (buffer) {
+      this.computeWaveform(buffer);
+    } else {
+      this.waveformPeaks = null;
+      this.transientPeaks = null;
+    }
+  }
+
+  public clear() {
+    if (this.isPlaying) {
+      this.pause();
+    }
+    if (this.songSource) {
+      try {
+        this.songSource.stop();
+        this.songSource.disconnect();
+      } catch {}
+      this.songSource = null;
+    }
+    this.songBuffer = null;
+    this.waveformPeaks = null;
+    this.transientPeaks = null;
+    this.pauseOffsetMs = 0;
+    this.customSamples.clear();
+    this.currentLanes = [];
+    this.currentTriggers = [];
+    this.scheduledTriggerIds.clear();
   }
 
   public getWaveform(): { peaks: Float32Array | null; transients: Float32Array | null; duration: number } {
@@ -156,29 +182,18 @@ export class AudioEngine {
     const setStr = lane.sampleSet.toLowerCase();
     const addStr = lane.addition.toLowerCase();
     const idx = lane.customIndex || 0;
-    const idxStr = idx > 1 ? String(idx) : '';
 
     // Check custom sample map (e.g. "soft-hitclap.wav", "soft-hitclap2.ogg")
     const searchKeys: string[] = [];
-    if (lane.addition === 'None') {
-      if (idxStr) {
-        searchKeys.push(`${setStr}-hitnormal${idxStr}.wav`);
-        searchKeys.push(`${setStr}-hitnormal${idxStr}.ogg`);
-        searchKeys.push(`${setStr}-hitnormal${idxStr}.mp3`);
-      }
-      searchKeys.push(`${setStr}-hitnormal.wav`);
-      searchKeys.push(`${setStr}-hitnormal.ogg`);
-      searchKeys.push(`${setStr}-hitnormal.mp3`);
-    } else {
-      if (idxStr) {
-        searchKeys.push(`${setStr}-hit${addStr}${idxStr}.wav`);
-        searchKeys.push(`${setStr}-hit${addStr}${idxStr}.ogg`);
-        searchKeys.push(`${setStr}-hit${addStr}${idxStr}.mp3`);
-      }
-      searchKeys.push(`${setStr}-hit${addStr}.wav`);
-      searchKeys.push(`${setStr}-hit${addStr}.ogg`);
-      searchKeys.push(`${setStr}-hit${addStr}.mp3`);
+    const baseName = lane.addition === 'None' ? `${setStr}-hitnormal` : `${setStr}-hit${addStr}`;
+
+    if (idx > 1) {
+      searchKeys.push(`${baseName}${idx}.wav`, `${baseName}${idx}.ogg`, `${baseName}${idx}.mp3`);
+    } else if (idx === 1) {
+      searchKeys.push(`${baseName}1.wav`, `${baseName}1.ogg`, `${baseName}1.mp3`);
+      searchKeys.push(`${baseName}.wav`, `${baseName}.ogg`, `${baseName}.mp3`);
     }
+    searchKeys.push(`${baseName}.wav`, `${baseName}.ogg`, `${baseName}.mp3`);
 
     for (const key of searchKeys) {
       if (this.customSamples.has(key)) {
@@ -210,7 +225,7 @@ export class AudioEngine {
 
   public updateSchedulerData(lanes: Lane[], triggers: Trigger[]) {
     this.currentLanes = lanes;
-    this.currentTriggers = triggers;
+    this.currentTriggers = [...triggers].sort((a, b) => a.time - b.time);
   }
 
   public play(fromMs?: number, lanes: Lane[] = [], triggers: Trigger[] = []) {
@@ -218,7 +233,7 @@ export class AudioEngine {
     if (this.isPlaying) this.pause();
 
     this.currentLanes = lanes;
-    this.currentTriggers = triggers;
+    this.currentTriggers = [...triggers].sort((a, b) => a.time - b.time);
 
     if (fromMs !== undefined) {
       this.pauseOffsetMs = Math.max(0, fromMs);
@@ -339,8 +354,26 @@ export class AudioEngine {
         laneMap.set(l.id, l);
       }
 
-      for (const tr of triggers) {
-        if (tr.time >= currentMs - 20 && tr.time <= lookaheadEndMs) {
+      const targetTime = currentMs - 20;
+      let startIdx = 0;
+      let low = 0;
+      let high = triggers.length - 1;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (triggers[mid].time < targetTime) {
+          low = mid + 1;
+        } else {
+          startIdx = mid;
+          high = mid - 1;
+        }
+      }
+      if (low > high && low < triggers.length) startIdx = low;
+
+      for (let i = startIdx; i < triggers.length; i++) {
+        const tr = triggers[i];
+        if (tr.time > lookaheadEndMs) break;
+
+        if (tr.time >= targetTime) {
           if (!this.scheduledTriggerIds.has(tr.id)) {
             this.scheduledTriggerIds.add(tr.id);
 
@@ -369,10 +402,12 @@ export class AudioEngine {
       }
 
       // Garbage collect old scheduled IDs
-      if (this.scheduledTriggerIds.size > 2000) {
+      if (this.scheduledTriggerIds.size > 1500) {
         for (const tr of triggers) {
-          if (tr.time < currentMs - 1000) {
+          if (tr.time < currentMs - 2000) {
             this.scheduledTriggerIds.delete(tr.id);
+          } else {
+            break;
           }
         }
       }

@@ -549,6 +549,12 @@ body, html {
   border-color: var(--text-muted);
 }
 
+.btn.active, .btn-outline.active {
+  background-color: #2563eb;
+  border-color: #3b82f6;
+  color: #fff;
+}
+
 .btn-sm {
   padding: 2px 7px;
   font-size: 0.72rem;

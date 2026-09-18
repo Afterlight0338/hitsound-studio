@@ -156,4 +156,30 @@ if (fs.existsSync(shioriOszPath)) {
   }
 }
 
-console.log('\n>>> ALL 5 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+// Test 6: Auto-separating hitsounds from maps without hitsound diff (Fallen Symphony)
+const fallenPath = '/home/afterlight/Downloads/1952187 Ludicin - Fallen Symphony.osz';
+if (fs.existsSync(fallenPath)) {
+  const JSZip = (await import('jszip')).default;
+  const { importHitsoundsFromBeatmap } = await import('../src/osu/hitsoundImporter');
+  const data = fs.readFileSync(fallenPath);
+  const zip = await JSZip.loadAsync(data);
+  const diffEntry = zip.file('Ludicin - Fallen Symphony (Ilay) [Cruel Descent].osu');
+  if (diffEntry) {
+    const text = await diffEntry.async('text');
+    const parsed = parseOsu(text, 'Cruel Descent.osu');
+    const imported = importHitsoundsFromBeatmap(parsed);
+    console.log(`[PASS] Auto-separated Fallen Symphony diff: created ${imported.lanes.length} lanes from ${imported.importedNoteCount} triggers!`);
+    if (imported.lanes.length !== 43 || imported.importedNoteCount !== 8081) {
+      throw new Error(`Expected 43 lanes and 8081 triggers from Fallen Symphony, got ${imported.lanes.length} lanes and ${imported.importedNoteCount} triggers`);
+    }
+
+    // Generate Hitsound diff from these separated lanes
+    const gen = generateHitsoundBeatmap(imported.lanes, imported.triggers, parsed, 'Hitsounds');
+    if (gen.totalNotes === 0) {
+      throw new Error('Expected generated hitsound notes!');
+    }
+    console.log(`[PASS] Generated Hitsounds diff from separated lanes: ${gen.totalNotes} centered notes!`);
+  }
+}
+
+console.log('\n>>> ALL 6 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
