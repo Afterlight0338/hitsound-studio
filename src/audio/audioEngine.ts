@@ -27,6 +27,8 @@ export class AudioEngine {
   private customSamples = new Map<string, AudioBuffer>();
   private defaultSamples = new Map<string, AudioBuffer>();
   private laneBufferCache = new Map<string, AudioBuffer>();
+  private rawSampleFiles = new Map<string, Uint8Array>();
+  private decodingPromises = new Map<string, Promise<AudioBuffer | null>>();
   private isPreloadingDefaults = false;
 
   // Dynamic references to active project data
@@ -94,6 +96,12 @@ export class AudioEngine {
     const ctx = this.ensureContext();
     const copy = arrayBuffer.slice(0);
     return await ctx.decodeAudioData(copy);
+  }
+
+  public setRawSampleFiles(files: Map<string, Uint8Array>) {
+    this.rawSampleFiles = files;
+    this.decodingPromises.clear();
+    this.laneBufferCache.clear();
   }
 
   public setCustomSamples(samples: Map<string, AudioBuffer>) {
@@ -257,6 +265,30 @@ export class AudioEngine {
         const buf = this.customSamples.get(key)!;
         this.laneBufferCache.set(cacheKey, buf);
         return buf;
+      }
+    }
+
+    // 1.5. If raw sample exists in map archive, decode on demand
+    for (const key of searchKeys) {
+      if (this.rawSampleFiles.has(key)) {
+        if (!this.decodingPromises.has(key)) {
+          const rawBytes = this.rawSampleFiles.get(key)!;
+          if (rawBytes.length > 44) {
+            const arrBuf = rawBytes.buffer.slice(
+              rawBytes.byteOffset,
+              rawBytes.byteOffset + rawBytes.byteLength
+            ) as ArrayBuffer;
+            const p = this.decodeSampleAudio(arrBuf)
+              .then((buf) => {
+                this.customSamples.set(key, buf);
+                this.laneBufferCache.set(cacheKey, buf);
+                return buf;
+              })
+              .catch(() => null);
+            this.decodingPromises.set(key, p);
+          }
+        }
+        break;
       }
     }
 

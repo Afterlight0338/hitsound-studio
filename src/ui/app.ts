@@ -383,6 +383,19 @@ export class App {
       this.sequencer.setScrollTop(lanesList.scrollTop);
     });
 
+    lanesList?.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const maxScrollTop = Math.max(0, this.lanes.length * this.sequencer.laneHeight - (lanesList.clientHeight || 500));
+        const newScroll = Math.max(0, Math.min(maxScrollTop, this.sequencer.scrollTopPx + e.deltaY));
+        this.sequencer.scrollTopPx = newScroll;
+        lanesList.scrollTop = newScroll;
+        this.sequencer.render();
+      },
+      { passive: false }
+    );
+
     this.updateSequencerData();
   }
 
@@ -970,7 +983,7 @@ export class App {
         if (lane.muted) {
           lane.solo = false;
         }
-        this.renderLanesList();
+        this.updateLaneItemStyles();
         this.updateSequencerData();
       });
 
@@ -980,7 +993,7 @@ export class App {
         if (lane.solo) {
           lane.muted = false;
         }
-        this.renderLanesList();
+        this.updateLaneItemStyles();
         this.updateSequencerData();
       });
 
@@ -1025,10 +1038,29 @@ export class App {
     }
   }
 
+  private updateLaneItemStyles() {
+    const container = document.getElementById('lanes-list');
+    if (!container) return;
+    const hasSolo = this.lanes.some((l) => l.solo);
+    const items = container.querySelectorAll('.lane-item');
+    for (let i = 0; i < this.lanes.length && i < items.length; i++) {
+      const lane = this.lanes[i];
+      const item = items[i] as HTMLElement;
+      const isMuted = lane.muted;
+      const isSoloInactive = hasSolo && !lane.solo;
+      item.classList.toggle('is-muted', isMuted);
+      item.classList.toggle('is-inactive', isSoloInactive);
+      const muteBtn = item.querySelector('.btn-mute');
+      const soloBtn = item.querySelector('.btn-solo');
+      muteBtn?.classList.toggle('active', isMuted);
+      soloBtn?.classList.toggle('active', lane.solo);
+    }
+  }
+
   // --- Convert Existing Hitsound Diff into Lanes ---
 
   public importDiffIntoLanes(beatmap: OsuBeatmap, showAlert: boolean = true) {
-    const res = importHitsoundsFromBeatmap(beatmap);
+    const res = importHitsoundsFromBeatmap(beatmap, this.rawZipFiles);
     if (res.lanes.length === 0) {
       if (showAlert) alert('No hitsound notes found in selected difficulty.');
       return;
@@ -1180,20 +1212,8 @@ export class App {
         }
       }
 
-      // 4. Decode custom hitsound samples (.wav and .ogg)
-      for (const [filename, bytes] of this.rawZipFiles.entries()) {
-        const lower = filename.toLowerCase();
-        if (lower.endsWith('.wav') || lower.endsWith('.ogg')) {
-          try {
-            const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-            const sampleBuffer = await this.audioEngine.decodeSampleAudio(arrayBuf);
-            this.customSamples.set(lower, sampleBuffer);
-          } catch {
-            // Ignore corrupted/unsupported sample
-          }
-        }
-      }
-      this.audioEngine.setCustomSamples(this.customSamples);
+      // 4. Set raw samples in audioEngine for on-demand decoding
+      this.audioEngine.setRawSampleFiles(this.rawZipFiles);
 
       // 5. Intelligent Separation & Ghost setup:
       const hsDiff = this.allBeatmaps.find(
@@ -1207,16 +1227,57 @@ export class App {
       playableDiffs.sort((a, b) => b.hitObjects.length - a.hitObjects.length);
 
       if (hsDiff) {
-        // Automatically import hitsound diff straight into lanes (no confirm prompt)
+        // Automatically import hitsound diff straight into lanes
         this.importDiffIntoLanes(hsDiff, false);
         // Default ghost notes to top playable diff
         this.referenceBeatmap = playableDiffs[0] || hsDiff;
       } else {
-        // Mapset without hitsound diff (like Fallen Symphony) -> auto-separate top diff into lanes!
+        // Mapset without hitsound diff -> auto-separate top diff into lanes!
         const topDiff = playableDiffs[0] || this.allBeatmaps[0];
         this.referenceBeatmap = topDiff;
         this.importDiffIntoLanes(topDiff, false);
       }
+
+      // 6. Fast Parallel Pre-decode for active lane samples
+      const decodePromises: Promise<void>[] = [];
+      const queuedKeys = new Set<string>();
+
+      for (const lane of this.lanes) {
+        const setStr = lane.sampleSet.toLowerCase();
+        const addStr = lane.addition.toLowerCase();
+        const idx = lane.customIndex || 0;
+        const baseName = lane.addition === 'None' ? `${setStr}-hitnormal` : `${setStr}-hit${addStr}`;
+
+        const candidates = [
+          `${baseName}${idx > 1 ? idx : ''}.wav`,
+          `${baseName}${idx > 1 ? idx : ''}.ogg`,
+          `${baseName}.wav`,
+          `${baseName}.ogg`,
+          `${baseName}1.wav`,
+          `${baseName}1.ogg`,
+        ];
+
+        for (const key of candidates) {
+          if (this.rawZipFiles.has(key) && !queuedKeys.has(key) && !this.customSamples.has(key)) {
+            queuedKeys.add(key);
+            const bytes = this.rawZipFiles.get(key)!;
+            // Skip 44-byte silent dummy slider wavs
+            if (bytes.length > 44) {
+              const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+              decodePromises.push(
+                this.audioEngine.decodeSampleAudio(arrayBuf)
+                  .then((buf) => {
+                    this.customSamples.set(key, buf);
+                  })
+                  .catch(() => {})
+              );
+            }
+          }
+        }
+      }
+
+      await Promise.all(decodePromises);
+      this.audioEngine.setCustomSamples(this.customSamples);
 
       // Sync metadata & timing from reference diff
       if (this.referenceBeatmap) {

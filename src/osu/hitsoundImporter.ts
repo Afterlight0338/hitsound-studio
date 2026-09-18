@@ -19,9 +19,56 @@ function numberToSampleSet(num: number): SampleSetType {
   }
 }
 
-export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsoundsResult {
+export function importHitsoundsFromBeatmap(
+  beatmap: OsuBeatmap,
+  availableSampleFiles?: Set<string> | Map<string, unknown>
+): ImportHitsoundsResult {
   const laneMap = new Map<string, Lane>();
   const triggers: Trigger[] = [];
+
+  const sampleFileSet = availableSampleFiles
+    ? (availableSampleFiles instanceof Set
+        ? new Set(Array.from(availableSampleFiles).map((s) => s.toLowerCase()))
+        : new Set(Array.from(availableSampleFiles.keys()).map((s) => s.toLowerCase())))
+    : null;
+
+  function resolveEffectiveIndex(
+    sampleSet: SampleSetType,
+    addition: 'None' | 'Whistle' | 'Finish' | 'Clap',
+    customIndex: number
+  ): number {
+    if (!sampleFileSet || customIndex <= 0) return customIndex;
+
+    const setStr = sampleSet.toLowerCase();
+    const addStr = addition.toLowerCase();
+    const baseName = addition === 'None' ? `${setStr}-hitnormal` : `${setStr}-hit${addStr}`;
+
+    // 1. If index > 1, does the mapset provide this specific numbered sample?
+    if (customIndex > 1) {
+      if (
+        sampleFileSet.has(`${baseName}${customIndex}.wav`) ||
+        sampleFileSet.has(`${baseName}${customIndex}.ogg`) ||
+        sampleFileSet.has(`${baseName}${customIndex}.mp3`)
+      ) {
+        return customIndex;
+      }
+    }
+
+    // 2. Does the mapset provide the base or index 1 custom override?
+    if (
+      sampleFileSet.has(`${baseName}.wav`) ||
+      sampleFileSet.has(`${baseName}.ogg`) ||
+      sampleFileSet.has(`${baseName}.mp3`) ||
+      sampleFileSet.has(`${baseName}1.wav`) ||
+      sampleFileSet.has(`${baseName}1.ogg`) ||
+      sampleFileSet.has(`${baseName}1.mp3`)
+    ) {
+      return 1;
+    }
+
+    // 3. Beatmap does not override this sample at all; in osu! it falls back to standard skin default (index 0)
+    return 0;
+  }
 
   const laneColors = [
     '#ff4081', '#00e5ff', '#ffc400', '#76ff03', '#e040fb',
@@ -97,7 +144,8 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     const volume = volumeOverride > 0 ? volumeOverride : (activeTp?.volume || 100);
 
     // 2. IN OSU!: Every note ALWAYS triggers HitNormal (the base tap/kick layer)
-    const normalLane = getOrCreateLane(normalSet, 'None', customIndex, volume);
+    const effNormalIdx = resolveEffectiveIndex(normalSet, 'None', customIndex);
+    const normalLane = getOrCreateLane(normalSet, 'None', effNormalIdx, volume);
     triggers.push({
       id: `tr-${time}-${normalLane.id}-${triggers.length}`,
       laneId: normalLane.id,
@@ -111,7 +159,8 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     const hasClap = (hitSound & 8) !== 0;
 
     if (hasClap) {
-      const clapLane = getOrCreateLane(additionSet, 'Clap', customIndex, volume);
+      const effClapIdx = resolveEffectiveIndex(additionSet, 'Clap', customIndex);
+      const clapLane = getOrCreateLane(additionSet, 'Clap', effClapIdx, volume);
       triggers.push({
         id: `tr-${time}-${clapLane.id}-${triggers.length}`,
         laneId: clapLane.id,
@@ -121,7 +170,8 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     }
 
     if (hasWhistle) {
-      const whistleLane = getOrCreateLane(additionSet, 'Whistle', customIndex, volume);
+      const effWhistleIdx = resolveEffectiveIndex(additionSet, 'Whistle', customIndex);
+      const whistleLane = getOrCreateLane(additionSet, 'Whistle', effWhistleIdx, volume);
       triggers.push({
         id: `tr-${time}-${whistleLane.id}-${triggers.length}`,
         laneId: whistleLane.id,
@@ -131,7 +181,8 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     }
 
     if (hasFinish) {
-      const finishLane = getOrCreateLane(additionSet, 'Finish', customIndex, volume);
+      const effFinishIdx = resolveEffectiveIndex(additionSet, 'Finish', customIndex);
+      const finishLane = getOrCreateLane(additionSet, 'Finish', effFinishIdx, volume);
       triggers.push({
         id: `tr-${time}-${finishLane.id}-${triggers.length}`,
         laneId: finishLane.id,

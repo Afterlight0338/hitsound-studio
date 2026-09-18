@@ -549,6 +549,9 @@ export class Sequencer {
       const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
       const h = this.laneHeight - 12;
 
+      // Vertical culling: skip triggers on lanes scrolled off-screen
+      if (y + h < this.rulerHeight || y > this.canvas.height) continue;
+
       const isSelected = this.selectedTriggerIds.has(tr.id);
 
       this.ctx.save();

@@ -180,6 +180,37 @@ if (fs.existsSync(fallenPath)) {
     }
     console.log(`[PASS] Generated Hitsounds diff from separated lanes: ${gen.totalNotes} centered notes!`);
   }
+
+  // 7. Test Keysounded Map (HOYO-MiX with 240+ samples) Consolidation
+  const hoyoPath = '/home/afterlight/Downloads/2136372 HOYO-MiX - If I Can Stop One Heart From Breaking.osz';
+  if (fs.existsSync(hoyoPath)) {
+    const hoyoBuf = fs.readFileSync(hoyoPath);
+    const hoyoZip = await JSZip.loadAsync(hoyoBuf);
+    const rawZipFiles = new Map<string, Uint8Array>();
+    for (const [filename, entry] of Object.entries(hoyoZip.files)) {
+      if (!entry.dir) {
+        rawZipFiles.set(filename.toLowerCase(), await entry.async('uint8array'));
+      }
+    }
+    const osuKey = Object.keys(hoyoZip.files).find((k) => k.includes('Longing Dream'))!;
+    const hoyoText = await hoyoZip.files[osuKey].async('text');
+    const hoyoParsed = parseOsu(hoyoText, osuKey);
+
+    // Without sample-awareness: would create 234 lanes
+    const naive = importHitsoundsFromBeatmap(hoyoParsed);
+    if (naive.lanes.length !== 234) {
+      throw new Error(`Expected 234 naive lanes, got ${naive.lanes.length}`);
+    }
+
+    // With sample-awareness: cleanly consolidates nonexistent hitnormal indices from 234 down to 139 active lanes!
+    const consolidated = importHitsoundsFromBeatmap(hoyoParsed, rawZipFiles);
+    if (consolidated.lanes.length !== 139) {
+      throw new Error(`Expected consolidated lanes === 139, got ${consolidated.lanes.length}`);
+    }
+    console.log(
+      `[PASS] Keysounded map consolidation: collapsed ${naive.lanes.length} raw lanes down to ${consolidated.lanes.length} active, non-empty keysound lanes!`
+    );
+  }
 }
 
-console.log('\n>>> ALL 6 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+console.log('\n>>> ALL 7 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
