@@ -3,8 +3,10 @@ import type { HitObject, Lane, TimingPoint, Trigger } from '../types';
 export interface SequencerEvents {
   onAddTrigger: (laneId: string, time: number) => void;
   onRemoveTrigger: (triggerId: string) => void;
+  onDeleteSelected: (triggerIds: string[]) => void;
   onSeek: (timeMs: number) => void;
   onPreviewSample: (lane: Lane) => void;
+  onScrollVertical: (scrollTop: number) => void;
 }
 
 export class Sequencer {
@@ -20,17 +22,27 @@ export class Sequencer {
   private transientPeaks: Float32Array | null = null;
   private durationMs = 0;
 
-  // Viewport
+  // Exact Layout Dimensions matching the Left Channel Rack
   public zoomPxPerSec = 140; // Horizontal zoom
   public scrollLeftMs = 0; // Current view start in ms
-  public laneHeight = 38;
-  public rulerHeight = 52;
+  public scrollTopPx = 0; // Vertical scroll
+  public laneHeight = 58; // Exactly matches HTML lane card height
+  public rulerHeight = 64; // Exactly matches left rack header height
   public currentTimeMs = 0;
   public activeSnapDivisor = 4; // 1/4 default
   public followPlayhead = true;
 
-  private events: SequencerEvents;
+  // Selection & Mouse States
+  public selectedTriggerIds = new Set<string>();
   private isScrubbingRuler = false;
+  private isBoxSelecting = false;
+  private isPainting = false;
+  private isErasing = false;
+  private selectionStart = { x: 0, y: 0 };
+  private selectionCurrent = { x: 0, y: 0 };
+
+  private lastPaintedCell: string | null = null;
+  private events: SequencerEvents;
 
   constructor(canvas: HTMLCanvasElement, events: SequencerEvents) {
     this.canvas = canvas;
@@ -75,7 +87,6 @@ export class Sequencer {
   public setTime(timeMs: number) {
     this.currentTimeMs = timeMs;
 
-    // Follow playhead if enabled
     if (this.followPlayhead) {
       const viewDurationMs = (this.canvas.getBoundingClientRect().width / this.zoomPxPerSec) * 1000;
       if (timeMs > this.scrollLeftMs + viewDurationMs * 0.85 || timeMs < this.scrollLeftMs) {
@@ -83,6 +94,11 @@ export class Sequencer {
       }
     }
 
+    this.render();
+  }
+
+  public setScrollTop(scrollTop: number) {
+    this.scrollTopPx = scrollTop;
     this.render();
   }
 
@@ -151,246 +167,87 @@ export class Sequencer {
     this.ctx.clearRect(0, 0, width, height);
 
     // Background
-    this.ctx.fillStyle = '#14161d';
+    this.ctx.fillStyle = '#0f1115';
     this.ctx.fillRect(0, 0, width, height);
 
     const viewStartMs = this.scrollLeftMs;
     const viewEndMs = this.pxToMs(width);
 
-    // 1. Draw Waveform in ruler area
-    this.renderWaveform(width);
+    // 1. Draw Lane rows in scrollable area (clipped under ruler)
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(0, this.rulerHeight, width, height - this.rulerHeight);
+    this.ctx.clip();
 
-    // 2. Draw Lane backgrounds
     this.renderLaneRows(width, height);
-
-    // 3. Draw Grid Lines (Beats & Sub-beats)
     this.renderGrid(viewStartMs, viewEndMs, height);
-
-    // 4. Draw Ghost HitObjects from reference map
     this.renderGhostObjects(viewStartMs, viewEndMs);
-
-    // 5. Draw Triggers
     this.renderTriggers(viewStartMs, viewEndMs);
 
-    // 6. Draw Timeline Ruler
-    this.renderRuler(width, viewStartMs, viewEndMs);
+    // Render Box Selection rectangle
+    if (this.isBoxSelecting) {
+      this.renderSelectionBox();
+    }
 
-    // 7. Draw Playhead
+    this.ctx.restore();
+
+    // 2. Draw Sticky Top Timeline Ruler & Waveform (always on top)
+    this.renderRulerAndWaveform(width, viewStartMs, viewEndMs);
+
+    // 3. Draw Playhead
     this.renderPlayhead(height);
   }
 
-  private renderWaveform(width: number) {
-    if (!this.waveformPeaks) return;
-
-    const rulerH = this.rulerHeight;
-    const pointsPerSec = 150;
-    const totalPoints = this.waveformPeaks.length;
-
-    this.ctx.fillStyle = 'rgba(74, 158, 255, 0.12)';
-
-    const startIdx = Math.max(0, Math.floor((this.scrollLeftMs / 1000) * pointsPerSec));
-    const endIdx = Math.min(totalPoints, Math.ceil((this.pxToMs(width) / 1000) * pointsPerSec));
-
-    this.ctx.beginPath();
-    for (let i = startIdx; i < endIdx; i++) {
-      const timeMs = (i / pointsPerSec) * 1000;
-      const x = this.msToPx(timeMs);
-      const peak = this.waveformPeaks[i] || 0;
-      const h = peak * (rulerH * 0.7);
-      this.ctx.rect(x, rulerH - h, 2, h);
-    }
-    this.ctx.fill();
-
-    // Render transients (punchy beats) as gold spikes
-    if (this.transientPeaks) {
-      this.ctx.fillStyle = 'rgba(255, 196, 0, 0.35)';
-      for (let i = startIdx; i < endIdx; i++) {
-        const trans = this.transientPeaks[i];
-        if (trans > 0.08) {
-          const timeMs = (i / pointsPerSec) * 1000;
-          const x = this.msToPx(timeMs);
-          const h = Math.min(rulerH, trans * rulerH * 1.5);
-          this.ctx.fillRect(x, rulerH - h, 1.5, h);
-        }
-      }
-    }
-  }
-
-  private renderLaneRows(width: number, height: number) {
-    let y = this.rulerHeight;
-
-    for (let i = 0; i < this.lanes.length; i++) {
-      const lane = this.lanes[i];
-      // Alternating row tone
-      this.ctx.fillStyle = i % 2 === 0 ? '#181b24' : '#1c202b';
-      this.ctx.fillRect(0, y, width, this.laneHeight);
-
-      // Subtle lane accent tint
-      this.ctx.fillStyle = lane.color + '0a';
-      this.ctx.fillRect(0, y, width, this.laneHeight);
-
-      // Lane bottom divider
-      this.ctx.strokeStyle = '#272c3b';
-      this.ctx.lineWidth = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(0, y + this.laneHeight);
-      this.ctx.lineTo(width, y + this.laneHeight);
-      this.ctx.stroke();
-
-      y += this.laneHeight;
-    }
-
-    // Remaining empty space
-    if (y < height) {
-      this.ctx.fillStyle = '#111319';
-      this.ctx.fillRect(0, y, width, height - y);
-    }
-  }
-
-  private renderGrid(viewStartMs: number, viewEndMs: number, totalHeight: number) {
-    const redLines = this.timingPoints.filter((tp) => tp.uninherited);
-    if (redLines.length === 0) return;
-
-    for (let i = 0; i < redLines.length; i++) {
-      const rl = redLines[i];
-      const nextRl = redLines[i + 1];
-      const segmentEndMs = nextRl ? nextRl.time : Math.max(viewEndMs, this.durationMs);
-
-      const segmentStart = Math.max(rl.time, viewStartMs - rl.beatLength * 2);
-      const segmentEnd = Math.min(segmentEndMs, viewEndMs + rl.beatLength * 2);
-
-      if (segmentStart >= segmentEnd) continue;
-
-      const beatLength = rl.beatLength;
-      const meter = rl.meter || 4;
-      const subInterval = beatLength / this.activeSnapDivisor;
-
-      // Calculate first beat index
-      const startBeat = Math.floor((segmentStart - rl.time) / subInterval);
-      const endBeat = Math.ceil((segmentEnd - rl.time) / subInterval);
-
-      for (let b = startBeat; b <= endBeat; b++) {
-        const timeMs = Math.round(rl.time + b * subInterval);
-        if (timeMs < viewStartMs || timeMs > viewEndMs) continue;
-
-        const x = Math.round(this.msToPx(timeMs)) + 0.5;
-        const isMeasure = b % (this.activeSnapDivisor * meter) === 0;
-        const isWholeBeat = b % this.activeSnapDivisor === 0;
-        const isHalfBeat = (b * 2) % this.activeSnapDivisor === 0;
-
-        if (isMeasure) {
-          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
-          this.ctx.lineWidth = 1.5;
-        } else if (isWholeBeat) {
-          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-          this.ctx.lineWidth = 1;
-        } else if (isHalfBeat) {
-          this.ctx.strokeStyle = 'rgba(100, 180, 255, 0.1)';
-          this.ctx.lineWidth = 1;
-        } else {
-          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
-          this.ctx.lineWidth = 1;
-        }
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(x, this.rulerHeight);
-        this.ctx.lineTo(x, totalHeight);
-        this.ctx.stroke();
-      }
-    }
-  }
-
-  private renderGhostObjects(viewStartMs: number, viewEndMs: number) {
-    if (this.ghostHitObjects.length === 0) return;
-
-    const totalLanesHeight = this.lanes.length * this.laneHeight;
-    const baseY = this.rulerHeight;
-
-    for (const ho of this.ghostHitObjects) {
-      if (ho.time < viewStartMs - 2000 || ho.time > viewEndMs + 2000) continue;
-
-      const x = this.msToPx(ho.time);
-      const isCircle = (ho.type & 1) !== 0;
-      const isSlider = (ho.type & 2) !== 0;
-
-      if (isCircle) {
-        // Vertical ghost marker for circle
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
-        this.ctx.fillRect(x - 2, baseY, 4, totalLanesHeight);
-
-        // Center hit marker
-        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-        this.ctx.lineWidth = 1.5;
-        this.ctx.strokeRect(x - 5, baseY + 2, 10, totalLanesHeight - 4);
-      } else if (isSlider) {
-        const endTime = ho.endTime || ho.time + 300;
-        const endX = this.msToPx(endTime);
-        const w = Math.max(6, endX - x);
-
-        // Slider span block
-        this.ctx.fillStyle = 'rgba(120, 170, 255, 0.08)';
-        this.ctx.fillRect(x, baseY, w, totalLanesHeight);
-
-        // Head and tail borders
-        this.ctx.strokeStyle = 'rgba(120, 170, 255, 0.4)';
-        this.ctx.lineWidth = 1;
-        this.ctx.strokeRect(x, baseY, w, totalLanesHeight);
-      }
-    }
-  }
-
-  private renderTriggers(viewStartMs: number, viewEndMs: number) {
-    const laneIndexMap = new Map<string, number>();
-    for (let i = 0; i < this.lanes.length; i++) {
-      laneIndexMap.set(this.lanes[i].id, i);
-    }
-
-    const triggerW = Math.max(8, this.zoomPxPerSec * 0.06);
-
-    for (const tr of this.triggers) {
-      if (tr.time < viewStartMs - 500 || tr.time > viewEndMs + 500) continue;
-
-      const lIdx = laneIndexMap.get(tr.laneId);
-      if (lIdx === undefined) continue;
-
-      const lane = this.lanes[lIdx];
-      const x = this.msToPx(tr.time) - triggerW / 2;
-      const y = this.rulerHeight + lIdx * this.laneHeight + 4;
-      const h = this.laneHeight - 8;
-
-      // Trigger Block
-      this.ctx.fillStyle = lane.color;
-      this.ctx.beginPath();
-      this.ctx.roundRect(x, y, triggerW, h, 4);
-      this.ctx.fill();
-
-      // Trigger Glow / Border
-      this.ctx.strokeStyle = '#ffffff';
-      this.ctx.lineWidth = 1.2;
-      this.ctx.stroke();
-
-      // Inner highlight line
-      this.ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-      this.ctx.fillRect(x + 2, y + 2, triggerW - 4, 2);
-    }
-  }
-
-  private renderRuler(width: number, viewStartMs: number, viewEndMs: number) {
+  private renderRulerAndWaveform(width: number, viewStartMs: number, viewEndMs: number) {
     const rulerH = this.rulerHeight;
 
     // Ruler Background
-    this.ctx.fillStyle = '#101217';
+    this.ctx.fillStyle = '#14171f';
     this.ctx.fillRect(0, 0, width, rulerH);
 
-    // Bottom border
-    this.ctx.strokeStyle = '#2b3040';
-    this.ctx.lineWidth = 1.5;
+    // Draw Audio Waveform inside ruler
+    if (this.waveformPeaks) {
+      const pointsPerSec = 150;
+      const totalPoints = this.waveformPeaks.length;
+
+      this.ctx.fillStyle = 'rgba(74, 158, 255, 0.16)';
+      const startIdx = Math.max(0, Math.floor((this.scrollLeftMs / 1000) * pointsPerSec));
+      const endIdx = Math.min(totalPoints, Math.ceil((this.pxToMs(width) / 1000) * pointsPerSec));
+
+      this.ctx.beginPath();
+      for (let i = startIdx; i < endIdx; i++) {
+        const timeMs = (i / pointsPerSec) * 1000;
+        const x = this.msToPx(timeMs);
+        const peak = this.waveformPeaks[i] || 0;
+        const h = peak * (rulerH * 0.7);
+        this.ctx.rect(x, rulerH - h, 2, h);
+      }
+      this.ctx.fill();
+
+      // Render Transient beats as gold spikes
+      if (this.transientPeaks) {
+        this.ctx.fillStyle = 'rgba(255, 196, 0, 0.4)';
+        for (let i = startIdx; i < endIdx; i++) {
+          const trans = this.transientPeaks[i];
+          if (trans > 0.08) {
+            const timeMs = (i / pointsPerSec) * 1000;
+            const x = this.msToPx(timeMs);
+            const h = Math.min(rulerH, trans * rulerH * 1.5);
+            this.ctx.fillRect(x, rulerH - h, 1.5, h);
+          }
+        }
+      }
+    }
+
+    // Ruler bottom border (seamless alignment with left header)
+    this.ctx.strokeStyle = '#2b3142';
+    this.ctx.lineWidth = 1;
     this.ctx.beginPath();
-    this.ctx.moveTo(0, rulerH);
-    this.ctx.lineTo(width, rulerH);
+    this.ctx.moveTo(0, rulerH - 0.5);
+    this.ctx.lineTo(width, rulerH - 0.5);
     this.ctx.stroke();
 
-    // Red lines & Measures
+    // Measure & Beat ticks on ruler
     const redLines = this.timingPoints.filter((tp) => tp.uninherited);
     if (redLines.length > 0) {
       for (const rl of redLines) {
@@ -411,29 +268,214 @@ export class Sequencer {
           this.ctx.strokeStyle = '#4a9eff';
           this.ctx.lineWidth = 2;
           this.ctx.beginPath();
-          this.ctx.moveTo(x, rulerH - 18);
+          this.ctx.moveTo(x, rulerH - 22);
           this.ctx.lineTo(x, rulerH);
           this.ctx.stroke();
 
           // Measure text label
           this.ctx.fillStyle = '#8ab4f8';
-          this.ctx.font = '11px monospace';
-          this.ctx.fillText(`${m + 1}`, x + 4, 16);
+          this.ctx.font = 'bold 12px monospace';
+          this.ctx.fillText(`${m + 1}`, x + 5, 20);
 
           // Millisecond label
-          const sec = (mTime / 1000).toFixed(1);
-          this.ctx.fillStyle = '#667085';
-          this.ctx.font = '9px monospace';
-          this.ctx.fillText(`${sec}s`, x + 4, 28);
+          const sec = (mTime / 1000).toFixed(2);
+          this.ctx.fillStyle = '#7a869a';
+          this.ctx.font = '10px monospace';
+          this.ctx.fillText(`${sec}s`, x + 5, 34);
         }
       }
     }
   }
 
+  private renderLaneRows(width: number, height: number) {
+    let y = this.rulerHeight - this.scrollTopPx;
+
+    for (let i = 0; i < this.lanes.length; i++) {
+      const lane = this.lanes[i];
+
+      if (y + this.laneHeight > this.rulerHeight && y < height) {
+        // Alternating row background
+        this.ctx.fillStyle = i % 2 === 0 ? '#161922' : '#1a1e28';
+        this.ctx.fillRect(0, y, width, this.laneHeight);
+
+        // Subtle lane accent tint
+        this.ctx.fillStyle = lane.color + '0d';
+        this.ctx.fillRect(0, y, width, this.laneHeight);
+
+        // Lane bottom divider
+        this.ctx.strokeStyle = '#272d3d';
+        this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, y + this.laneHeight - 0.5);
+        this.ctx.lineTo(width, y + this.laneHeight - 0.5);
+        this.ctx.stroke();
+      }
+
+      y += this.laneHeight;
+    }
+
+    // Fill remaining area below last lane
+    if (y < height) {
+      this.ctx.fillStyle = '#0f1115';
+      this.ctx.fillRect(0, y, width, height - y);
+    }
+  }
+
+  private renderGrid(viewStartMs: number, viewEndMs: number, totalHeight: number) {
+    const redLines = this.timingPoints.filter((tp) => tp.uninherited);
+    if (redLines.length === 0) return;
+
+    const topY = this.rulerHeight;
+
+    for (let i = 0; i < redLines.length; i++) {
+      const rl = redLines[i];
+      const nextRl = redLines[i + 1];
+      const segmentEndMs = nextRl ? nextRl.time : Math.max(viewEndMs, this.durationMs);
+
+      const segmentStart = Math.max(rl.time, viewStartMs - rl.beatLength * 2);
+      const segmentEnd = Math.min(segmentEndMs, viewEndMs + rl.beatLength * 2);
+
+      if (segmentStart >= segmentEnd) continue;
+
+      const beatLength = rl.beatLength;
+      const meter = rl.meter || 4;
+      const subInterval = beatLength / this.activeSnapDivisor;
+
+      const startBeat = Math.floor((segmentStart - rl.time) / subInterval);
+      const endBeat = Math.ceil((segmentEnd - rl.time) / subInterval);
+
+      for (let b = startBeat; b <= endBeat; b++) {
+        const timeMs = Math.round(rl.time + b * subInterval);
+        if (timeMs < viewStartMs || timeMs > viewEndMs) continue;
+
+        const x = Math.round(this.msToPx(timeMs)) + 0.5;
+        const isMeasure = b % (this.activeSnapDivisor * meter) === 0;
+        const isWholeBeat = b % this.activeSnapDivisor === 0;
+        const isHalfBeat = (b * 2) % this.activeSnapDivisor === 0;
+
+        if (isMeasure) {
+          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.32)';
+          this.ctx.lineWidth = 1.5;
+        } else if (isWholeBeat) {
+          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+          this.ctx.lineWidth = 1;
+        } else if (isHalfBeat) {
+          this.ctx.strokeStyle = 'rgba(100, 180, 255, 0.1)';
+          this.ctx.lineWidth = 1;
+        } else {
+          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+          this.ctx.lineWidth = 1;
+        }
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, topY);
+        this.ctx.lineTo(x, totalHeight);
+        this.ctx.stroke();
+      }
+    }
+  }
+
+  private renderGhostObjects(viewStartMs: number, viewEndMs: number) {
+    if (this.ghostHitObjects.length === 0) return;
+
+    const totalLanesHeight = this.lanes.length * this.laneHeight;
+    const baseY = this.rulerHeight - this.scrollTopPx;
+
+    for (const ho of this.ghostHitObjects) {
+      if (ho.time < viewStartMs - 2000 || ho.time > viewEndMs + 2000) continue;
+
+      const x = this.msToPx(ho.time);
+      const isCircle = (ho.type & 1) !== 0;
+      const isSlider = (ho.type & 2) !== 0;
+
+      if (isCircle) {
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+        this.ctx.fillRect(x - 2, baseY, 4, totalLanesHeight);
+
+        this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        this.ctx.lineWidth = 1.5;
+        this.ctx.strokeRect(x - 5, baseY + 2, 10, totalLanesHeight - 4);
+      } else if (isSlider) {
+        const endTime = ho.endTime || ho.time + 300;
+        const endX = this.msToPx(endTime);
+        const w = Math.max(6, endX - x);
+
+        this.ctx.fillStyle = 'rgba(120, 170, 255, 0.06)';
+        this.ctx.fillRect(x, baseY, w, totalLanesHeight);
+
+        this.ctx.strokeStyle = 'rgba(120, 170, 255, 0.3)';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(x, baseY, w, totalLanesHeight);
+      }
+    }
+  }
+
+  private renderTriggers(viewStartMs: number, viewEndMs: number) {
+    const laneIndexMap = new Map<string, number>();
+    for (let i = 0; i < this.lanes.length; i++) {
+      laneIndexMap.set(this.lanes[i].id, i);
+    }
+
+    const triggerW = Math.max(10, this.zoomPxPerSec * 0.065);
+
+    for (const tr of this.triggers) {
+      if (tr.time < viewStartMs - 500 || tr.time > viewEndMs + 500) continue;
+
+      const lIdx = laneIndexMap.get(tr.laneId);
+      if (lIdx === undefined) continue;
+
+      const lane = this.lanes[lIdx];
+      const x = this.msToPx(tr.time) - triggerW / 2;
+      const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
+      const h = this.laneHeight - 12;
+
+      const isSelected = this.selectedTriggerIds.has(tr.id);
+
+      // Trigger Block
+      this.ctx.fillStyle = lane.color;
+      this.ctx.beginPath();
+      this.ctx.roundRect(x, y, triggerW, h, 4);
+      this.ctx.fill();
+
+      // Border & Selection Highlight
+      if (isSelected) {
+        this.ctx.strokeStyle = '#fffb00';
+        this.ctx.lineWidth = 2.5;
+        this.ctx.stroke();
+
+        // Extra selection glow
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        this.ctx.fillRect(x + 2, y + 2, triggerW - 4, h - 4);
+      } else {
+        this.ctx.strokeStyle = '#ffffff';
+        this.ctx.lineWidth = 1.2;
+        this.ctx.stroke();
+
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+        this.ctx.fillRect(x + 2, y + 2, triggerW - 4, 2);
+      }
+    }
+  }
+
+  private renderSelectionBox() {
+    const x = Math.min(this.selectionStart.x, this.selectionCurrent.x);
+    const y = Math.min(this.selectionStart.y, this.selectionCurrent.y);
+    const w = Math.abs(this.selectionCurrent.x - this.selectionStart.x);
+    const h = Math.abs(this.selectionCurrent.y - this.selectionStart.y);
+
+    this.ctx.fillStyle = 'rgba(74, 158, 255, 0.15)';
+    this.ctx.fillRect(x, y, w, h);
+
+    this.ctx.strokeStyle = '#4a9eff';
+    this.ctx.lineWidth = 1;
+    this.ctx.setLineDash([4, 4]);
+    this.ctx.strokeRect(x, y, w, h);
+    this.ctx.setLineDash([]);
+  }
+
   private renderPlayhead(totalHeight: number) {
     const x = Math.round(this.msToPx(this.currentTimeMs)) + 0.5;
 
-    // Playhead Line
     this.ctx.strokeStyle = '#ffffff';
     this.ctx.lineWidth = 1.5;
     this.ctx.beginPath();
@@ -441,12 +483,11 @@ export class Sequencer {
     this.ctx.lineTo(x, totalHeight);
     this.ctx.stroke();
 
-    // Playhead glowing pointer head
     this.ctx.fillStyle = '#4a9eff';
     this.ctx.beginPath();
-    this.ctx.moveTo(x - 6, 0);
-    this.ctx.lineTo(x + 6, 0);
-    this.ctx.lineTo(x, 10);
+    this.ctx.moveTo(x - 7, 0);
+    this.ctx.lineTo(x + 7, 0);
+    this.ctx.lineTo(x, 12);
     this.ctx.closePath();
     this.ctx.fill();
   }
@@ -460,6 +501,21 @@ export class Sequencer {
 
     this.canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Delete selected triggers with Delete / Backspace
+    window.addEventListener('keydown', (e) => {
+      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'SELECT') {
+        return;
+      }
+      if (e.code === 'Delete' || e.code === 'Backspace') {
+        if (this.selectedTriggerIds.size > 0) {
+          e.preventDefault();
+          this.events.onDeleteSelected(Array.from(this.selectedTriggerIds));
+          this.selectedTriggerIds.clear();
+          this.render();
+        }
+      }
+    });
   }
 
   private onMouseDown(e: MouseEvent) {
@@ -468,50 +524,189 @@ export class Sequencer {
     const clickY = e.clientY - rect.top;
 
     if (clickY <= this.rulerHeight) {
-      // Ruler scrubbing
+      // Scrub timeline on ruler
       this.isScrubbingRuler = true;
       const targetTime = Math.max(0, this.pxToMs(clickX));
       this.events.onSeek(targetTime);
       return;
     }
 
-    // Grid interaction
-    const laneIdx = Math.floor((clickY - this.rulerHeight) / this.laneHeight);
-    if (laneIdx < 0 || laneIdx >= this.lanes.length) return;
+    const gridY = clickY - this.rulerHeight + this.scrollTopPx;
+    const laneIdx = Math.floor(gridY / this.laneHeight);
 
-    const lane = this.lanes[laneIdx];
-    const rawTime = this.pxToMs(clickX);
-    const snappedTime = this.snapTimeToGrid(rawTime);
+    // Ctrl + Right Click Drag -> Erase Brush Mode
+    if (e.button === 2 || (e.ctrlKey && e.button === 2)) {
+      this.isErasing = true;
+      this.eraseTriggerAt(clickX, gridY);
+      return;
+    }
 
-    // Check if clicked near an existing trigger in this lane
-    const toleranceMs = (12 / this.zoomPxPerSec) * 1000;
-    const existing = this.triggers.find(
-      (tr) => tr.laneId === lane.id && Math.abs(tr.time - snappedTime) <= toleranceMs
-    );
+    // Ctrl + Left Click Drag -> Paint Mode
+    if (e.ctrlKey && e.button === 0) {
+      this.isPainting = true;
+      this.paintTriggerAt(clickX, gridY);
+      return;
+    }
 
-    if (e.button === 2 || (e.button === 0 && existing)) {
-      // Right click or click existing -> delete
-      if (existing) {
-        this.events.onRemoveTrigger(existing.id);
+    // Standard Left Click on empty space -> Start Marquee Box Selection
+    if (e.button === 0) {
+      if (laneIdx >= 0 && laneIdx < this.lanes.length) {
+        const lane = this.lanes[laneIdx];
+        const rawTime = this.pxToMs(clickX);
+        const snappedTime = this.snapTimeToGrid(rawTime);
+
+        // Check if clicking directly on an existing trigger
+        const toleranceMs = (14 / this.zoomPxPerSec) * 1000;
+        const existing = this.triggers.find(
+          (tr) => tr.laneId === lane.id && Math.abs(tr.time - snappedTime) <= toleranceMs
+        );
+
+        if (existing) {
+          if (e.shiftKey) {
+            // Toggle selection
+            if (this.selectedTriggerIds.has(existing.id)) {
+              this.selectedTriggerIds.delete(existing.id);
+            } else {
+              this.selectedTriggerIds.add(existing.id);
+            }
+          } else {
+            // Delete existing on click, or select
+            this.events.onRemoveTrigger(existing.id);
+          }
+          this.render();
+          return;
+        } else {
+          // If clicked without dragging, clear selection
+          if (!e.shiftKey) {
+            this.selectedTriggerIds.clear();
+          }
+
+          // Single click place trigger
+          this.events.onAddTrigger(lane.id, snappedTime);
+          this.events.onPreviewSample(lane);
+        }
       }
-    } else if (e.button === 0 && !existing) {
-      // Left click empty -> create
-      this.events.onAddTrigger(lane.id, snappedTime);
-      this.events.onPreviewSample(lane);
+
+      // Start box selection on drag
+      this.isBoxSelecting = true;
+      this.selectionStart = { x: clickX, y: clickY };
+      this.selectionCurrent = { x: clickX, y: clickY };
     }
   }
 
   private onMouseMove(e: MouseEvent) {
+    const rect = this.canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
     if (this.isScrubbingRuler) {
-      const rect = this.canvas.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const targetTime = Math.max(0, this.pxToMs(clickX));
+      const targetTime = Math.max(0, this.pxToMs(mouseX));
       this.events.onSeek(targetTime);
+      return;
+    }
+
+    const gridY = mouseY - this.rulerHeight + this.scrollTopPx;
+
+    // Paint mode: continuously place triggers as mouse drags
+    if (this.isPainting) {
+      this.paintTriggerAt(mouseX, gridY);
+      return;
+    }
+
+    // Erase mode: continuously delete triggers under mouse
+    if (this.isErasing) {
+      this.eraseTriggerAt(mouseX, gridY);
+      return;
+    }
+
+    // Box selection update
+    if (this.isBoxSelecting) {
+      this.selectionCurrent = { x: mouseX, y: mouseY };
+      this.updateBoxSelection();
+      this.render();
     }
   }
 
   private onMouseUp() {
     this.isScrubbingRuler = false;
+    this.isPainting = false;
+    this.isErasing = false;
+    this.lastPaintedCell = null;
+
+    if (this.isBoxSelecting) {
+      this.isBoxSelecting = false;
+      this.render();
+    }
+  }
+
+  private paintTriggerAt(x: number, gridY: number) {
+    const laneIdx = Math.floor(gridY / this.laneHeight);
+    if (laneIdx < 0 || laneIdx >= this.lanes.length) return;
+
+    const lane = this.lanes[laneIdx];
+    const rawTime = this.pxToMs(x);
+    const snappedTime = this.snapTimeToGrid(rawTime);
+
+    const cellKey = `${lane.id}_${snappedTime}`;
+    if (this.lastPaintedCell === cellKey) return;
+    this.lastPaintedCell = cellKey;
+
+    // Check if trigger already exists at this snap point
+    const toleranceMs = (10 / this.zoomPxPerSec) * 1000;
+    const existing = this.triggers.find(
+      (tr) => tr.laneId === lane.id && Math.abs(tr.time - snappedTime) <= toleranceMs
+    );
+
+    if (!existing) {
+      this.events.onAddTrigger(lane.id, snappedTime);
+      this.events.onPreviewSample(lane);
+    }
+  }
+
+  private eraseTriggerAt(x: number, gridY: number) {
+    const laneIdx = Math.floor(gridY / this.laneHeight);
+    if (laneIdx < 0 || laneIdx >= this.lanes.length) return;
+
+    const lane = this.lanes[laneIdx];
+    const rawTime = this.pxToMs(x);
+    const toleranceMs = (16 / this.zoomPxPerSec) * 1000;
+
+    const existing = this.triggers.find(
+      (tr) => tr.laneId === lane.id && Math.abs(tr.time - rawTime) <= toleranceMs
+    );
+
+    if (existing) {
+      this.events.onRemoveTrigger(existing.id);
+    }
+  }
+
+  private updateBoxSelection() {
+    const minX = Math.min(this.selectionStart.x, this.selectionCurrent.x);
+    const maxX = Math.max(this.selectionStart.x, this.selectionCurrent.x);
+    const minY = Math.min(this.selectionStart.y, this.selectionCurrent.y);
+    const maxY = Math.max(this.selectionStart.y, this.selectionCurrent.y);
+
+    const minTime = this.pxToMs(minX);
+    const maxTime = this.pxToMs(maxX);
+
+    const laneIndexMap = new Map<string, number>();
+    for (let i = 0; i < this.lanes.length; i++) {
+      laneIndexMap.set(this.lanes[i].id, i);
+    }
+
+    this.selectedTriggerIds.clear();
+
+    for (const tr of this.triggers) {
+      if (tr.time >= minTime && tr.time <= maxTime) {
+        const lIdx = laneIndexMap.get(tr.laneId);
+        if (lIdx === undefined) continue;
+
+        const triggerY = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + this.laneHeight / 2;
+        if (triggerY >= minY && triggerY <= maxY) {
+          this.selectedTriggerIds.add(tr.id);
+        }
+      }
+    }
   }
 
   private onWheel(e: WheelEvent) {
@@ -529,10 +724,16 @@ export class Sequencer {
       this.zoomPxPerSec = newZoom;
       this.scrollLeftMs = Math.max(0, mouseTime - (mouseX / newZoom) * 1000);
       this.render();
-    } else {
-      // Horizontal scroll
-      const deltaMs = ((e.deltaY || e.deltaX) / this.zoomPxPerSec) * 300;
+    } else if (e.shiftKey) {
+      // Shift + Wheel = Horizontal scroll
+      const deltaMs = (e.deltaY / this.zoomPxPerSec) * 300;
       this.scrollLeftMs = Math.max(0, this.scrollLeftMs + deltaMs);
+      this.render();
+    } else {
+      // Vertical scroll (synchronized with left rack)
+      const maxScrollTop = Math.max(0, this.lanes.length * this.laneHeight - (this.canvas.height / (window.devicePixelRatio || 1) - this.rulerHeight));
+      this.scrollTopPx = Math.max(0, Math.min(maxScrollTop, this.scrollTopPx + e.deltaY));
+      this.events.onScrollVertical(this.scrollTopPx);
       this.render();
     }
   }

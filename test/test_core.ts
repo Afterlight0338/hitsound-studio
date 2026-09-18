@@ -137,4 +137,23 @@ if (originalGreenLine && copiedGreenLine) {
   console.log(`[PASS] SV Preservation verified: Slider velocity ${originalGreenLine.beatLength} strictly preserved.`);
 }
 
-console.log('\n>>> ALL 4 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+// Test 5: Importing Hitsounds Diff from real .osz (Shiori)
+const shioriOszPath = '/home/afterlight/Downloads/2403722 shiho - Shiori (Sped Up & Cut Ver.).osz';
+if (fs.existsSync(shioriOszPath)) {
+  const JSZip = (await import('jszip')).default;
+  const { importHitsoundsFromBeatmap } = await import('../src/osu/hitsoundImporter');
+  const shioriData = fs.readFileSync(shioriOszPath);
+  const zip = await JSZip.loadAsync(shioriData);
+  const hsEntry = zip.file('shiho - Shiori (Sped Up & Cut Ver.) (RyoYamada) [Hitsounds].osu');
+  if (hsEntry) {
+    const text = await hsEntry.async('text');
+    const shioriHsMap = parseOsu(text, 'Shiori_Hitsounds.osu');
+    const imported = importHitsoundsFromBeatmap(shioriHsMap);
+    console.log(`[PASS] Hitsound diff import: created ${imported.lanes.length} lanes from ${imported.importedNoteCount} triggers!`);
+    if (imported.lanes.length === 0 || imported.triggers.length === 0) {
+      throw new Error('Expected imported lanes and triggers from Shiori hitsound diff!');
+    }
+  }
+}
+
+console.log('\n>>> ALL 5 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');

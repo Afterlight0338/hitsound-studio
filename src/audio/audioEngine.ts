@@ -24,8 +24,13 @@ export class AudioEngine {
   private scheduleTimer: number | null = null;
   private scheduledTriggerIds = new Set<string>();
 
-  // Synth cache
+  // Synth cache & custom samples
   private synthCache = new Map<string, AudioBuffer>();
+  private customSamples = new Map<string, AudioBuffer>();
+
+  // Dynamic references to active project data
+  private currentLanes: Lane[] = [];
+  private currentTriggers: Trigger[] = [];
 
   // Waveform
   private waveformPeaks: Float32Array | null = null;
@@ -36,12 +41,14 @@ export class AudioEngine {
   public onStateChange: ((isPlaying: boolean) => void) | null = null;
 
   constructor() {
-    // Lazy AudioContext initialization on first user gesture
+    // Lazy AudioContext initialization
   }
 
   private ensureContext(): AudioContext {
     if (!this.ctx) {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
 
       this.masterGainNode = this.ctx.createGain();
@@ -66,12 +73,30 @@ export class AudioEngine {
     return this.ensureContext();
   }
 
-  public async decodeAudio(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
+  /**
+   * Decodes main song audio (mp3/ogg/wav), computes waveform peaks and sets songBuffer
+   */
+  public async decodeSongAudio(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
     const ctx = this.ensureContext();
-    const buffer = await ctx.decodeAudioData(arrayBuffer);
+    // Use a copy of arrayBuffer in case decodeAudioData detaches it
+    const copy = arrayBuffer.slice(0);
+    const buffer = await ctx.decodeAudioData(copy);
     this.songBuffer = buffer;
     this.computeWaveform(buffer);
     return buffer;
+  }
+
+  /**
+   * Decodes a sample audio file (.wav / .ogg) without touching songBuffer
+   */
+  public async decodeSampleAudio(arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
+    const ctx = this.ensureContext();
+    const copy = arrayBuffer.slice(0);
+    return await ctx.decodeAudioData(copy);
+  }
+
+  public setCustomSamples(samples: Map<string, AudioBuffer>) {
+    this.customSamples = samples;
   }
 
   public setSongBuffer(buffer: AudioBuffer) {
@@ -122,9 +147,38 @@ export class AudioEngine {
     this.transientPeaks = transients;
   }
 
+  /**
+   * Resolves sample audio buffer: checks lane buffer -> custom sample files from map -> synth fallback
+   */
   public getSampleBuffer(lane: Lane): AudioBuffer {
     if (lane.audioBuffer) return lane.audioBuffer;
 
+    const setStr = lane.sampleSet.toLowerCase();
+    const addStr = lane.addition.toLowerCase();
+    const idx = lane.customIndex || 0;
+    const idxStr = idx > 1 ? String(idx) : '';
+
+    // Check custom sample map (e.g. "soft-hitclap.wav", "soft-hitclap2.ogg")
+    const searchKeys: string[] = [];
+    if (lane.addition === 'None') {
+      searchKeys.push(`${setStr}-hitnormal${idxStr}.wav`);
+      searchKeys.push(`${setStr}-hitnormal${idxStr}.ogg`);
+      searchKeys.push(`${setStr}-hitnormal.wav`);
+      searchKeys.push(`${setStr}-hitnormal.ogg`);
+    } else {
+      searchKeys.push(`${setStr}-hit${addStr}${idxStr}.wav`);
+      searchKeys.push(`${setStr}-hit${addStr}${idxStr}.ogg`);
+      searchKeys.push(`${setStr}-hit${addStr}.wav`);
+      searchKeys.push(`${setStr}-hit${addStr}.ogg`);
+    }
+
+    for (const key of searchKeys) {
+      if (this.customSamples.has(key)) {
+        return this.customSamples.get(key)!;
+      }
+    }
+
+    // Procedural synthesis fallback
     const ctx = this.ensureContext();
     let synthKey = 'soft-hitnormal';
 
@@ -146,9 +200,17 @@ export class AudioEngine {
     return this.synthCache.get(synthKey)!;
   }
 
+  public updateSchedulerData(lanes: Lane[], triggers: Trigger[]) {
+    this.currentLanes = lanes;
+    this.currentTriggers = triggers;
+  }
+
   public play(fromMs?: number, lanes: Lane[] = [], triggers: Trigger[] = []) {
     const ctx = this.ensureContext();
     if (this.isPlaying) this.pause();
+
+    this.currentLanes = lanes;
+    this.currentTriggers = triggers;
 
     if (fromMs !== undefined) {
       this.pauseOffsetMs = Math.max(0, fromMs);
@@ -169,14 +231,14 @@ export class AudioEngine {
         this.songSource.start(0, offsetSec);
       }
       this.songSource.onended = () => {
-        if (this.isPlaying && this.getCurrentTimeMs() >= (this.songBuffer?.duration ?? 0) * 1000) {
+        // Only trigger pause if we actually reached or exceeded duration
+        if (this.isPlaying && this.songBuffer && this.getCurrentTimeMs() >= this.songBuffer.duration * 1000 - 50) {
           this.pause();
         }
       };
     }
 
-    // Start lookahead hitsound scheduler
-    this.startScheduler(lanes, triggers);
+    this.startScheduler();
 
     if (this.onStateChange) this.onStateChange(true);
   }
@@ -192,7 +254,7 @@ export class AudioEngine {
         this.songSource.stop();
         this.songSource.disconnect();
       } catch {
-        // ignore if already stopped
+        // ignore
       }
       this.songSource = null;
     }
@@ -205,17 +267,20 @@ export class AudioEngine {
     if (this.onStateChange) this.onStateChange(false);
   }
 
-  public seek(toMs: number, lanes: Lane[] = [], triggers: Trigger[] = []) {
+  public seek(toMs: number, lanes?: Lane[], triggers?: Trigger[]) {
     const wasPlaying = this.isPlaying;
     if (wasPlaying) {
       this.pause();
     }
     this.pauseOffsetMs = Math.max(0, toMs);
+    if (lanes) this.currentLanes = lanes;
+    if (triggers) this.currentTriggers = triggers;
+
     if (this.onTimeUpdate) {
       this.onTimeUpdate(this.pauseOffsetMs);
     }
     if (wasPlaying) {
-      this.play(this.pauseOffsetMs, lanes, triggers);
+      this.play(this.pauseOffsetMs, this.currentLanes, this.currentTriggers);
     }
   }
 
@@ -242,15 +307,9 @@ export class AudioEngine {
     source.start();
   }
 
-  private startScheduler(lanes: Lane[], triggers: Trigger[]) {
+  private startScheduler() {
     if (this.scheduleTimer !== null) {
       window.clearInterval(this.scheduleTimer);
-    }
-
-    const laneMap = new Map<string, Lane>();
-    const hasSolo = lanes.some((l) => l.solo);
-    for (const l of lanes) {
-      laneMap.set(l.id, l);
     }
 
     this.scheduleTimer = window.setInterval(() => {
@@ -261,6 +320,15 @@ export class AudioEngine {
 
       if (this.onTimeUpdate) {
         this.onTimeUpdate(currentMs);
+      }
+
+      const lanes = this.currentLanes;
+      const triggers = this.currentTriggers;
+
+      const laneMap = new Map<string, Lane>();
+      const hasSolo = lanes.some((l) => l.solo);
+      for (const l of lanes) {
+        laneMap.set(l.id, l);
       }
 
       for (const tr of triggers) {
@@ -284,7 +352,7 @@ export class AudioEngine {
             source.connect(gain);
             gain.connect(this.hitsoundGainNode!);
 
-            // AudioContext time scheduling
+            // AudioContext high-precision scheduling
             const delaySec = Math.max(0, (tr.time - currentMs) / 1000 / this.playbackRate);
             const scheduledCtxTime = this.ctx.currentTime + delaySec;
             source.start(scheduledCtxTime);
@@ -292,7 +360,7 @@ export class AudioEngine {
         }
       }
 
-      // Cleanup old scheduled IDs
+      // Garbage collect old scheduled IDs
       if (this.scheduledTriggerIds.size > 2000) {
         for (const tr of triggers) {
           if (tr.time < currentMs - 1000) {

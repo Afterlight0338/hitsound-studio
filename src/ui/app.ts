@@ -3,6 +3,7 @@ import { AudioEngine } from '../audio/audioEngine';
 import { Sequencer } from '../editor/sequencer';
 import { copyHitsounds } from '../osu/copier';
 import { generateHitsoundBeatmap } from '../osu/hitsoundGenerator';
+import { importHitsoundsFromBeatmap } from '../osu/hitsoundImporter';
 import { parseOsu } from '../osu/parser';
 import type {
   CopierOptions,
@@ -180,7 +181,7 @@ export class App {
             <button id="btn-demo" class="btn btn-outline" title="Load demo song and beatmap">Load Demo</button>
             <label class="btn btn-outline file-btn">
               Import .osz / .osu
-              <input type="file" id="file-input" accept=".osz,.osu,.mp3,.wav" multiple hidden>
+              <input type="file" id="file-input" accept="*/*" multiple hidden>
             </label>
             <button id="btn-export-diff" class="btn btn-success">Export [Hitsounds].osu</button>
             <button id="btn-download-osz" class="btn btn-accent" title="Download updated .osz package">Save .osz</button>
@@ -193,17 +194,19 @@ export class App {
           <div id="view-studio" class="view-panel active">
             <!-- Left Channel Rack -->
             <aside class="channel-rack">
-              <div class="rack-header">
-                <span class="rack-title">LANES (${this.lanes.length})</span>
-                <button id="btn-add-lane" class="btn btn-sm btn-primary">+ Add Lane</button>
-              </div>
-
-              <!-- Reference Difficulty Selector -->
-              <div class="reference-selector">
-                <label>Ghost Map:</label>
-                <select id="select-reference-diff" class="dropdown full-width">
-                  <option value="">None</option>
-                </select>
+              <!-- Top header container: EXACTLY 64px to align with canvas rulerHeight -->
+              <div class="rack-header-container">
+                <div class="rack-top-line">
+                  <span id="rack-lanes-title" class="rack-title">LANES (${this.lanes.length})</span>
+                  <button id="btn-add-lane" class="btn btn-sm btn-primary">+ Add Lane</button>
+                </div>
+                <div class="rack-sub-line">
+                  <label style="font-size:0.75rem; color:var(--text-muted)">Ghost:</label>
+                  <select id="select-reference-diff" class="dropdown" style="flex:1">
+                    <option value="">None</option>
+                  </select>
+                  <button id="btn-import-hs-diff" class="btn btn-sm btn-outline" title="Convert an existing diff into editable lanes">📥 From Diff</button>
+                </div>
               </div>
 
               <!-- Lane Items Container -->
@@ -213,6 +216,9 @@ export class App {
             <!-- Sequencer Canvas Area -->
             <div class="sequencer-container">
               <canvas id="sequencer-canvas"></canvas>
+              <div class="hint-bar">
+                💡 <strong>Ctrl + Drag</strong>: Paint | <strong>Right-Click Drag</strong>: Erase | <strong>Drag</strong>: Select | <strong>Del</strong>: Delete
+              </div>
             </div>
           </div>
 
@@ -320,6 +326,8 @@ export class App {
 
   private initSequencer() {
     const canvas = document.getElementById('sequencer-canvas') as HTMLCanvasElement;
+    const lanesList = document.getElementById('lanes-list') as HTMLDivElement;
+
     this.sequencer = new Sequencer(canvas, {
       onAddTrigger: (laneId, time) => {
         const tr: Trigger = {
@@ -334,6 +342,11 @@ export class App {
         this.triggers = this.triggers.filter((t) => t.id !== triggerId);
         this.updateSequencerData();
       },
+      onDeleteSelected: (triggerIds) => {
+        const idSet = new Set(triggerIds);
+        this.triggers = this.triggers.filter((t) => !idSet.has(t.id));
+        this.updateSequencerData();
+      },
       onSeek: (timeMs) => {
         this.audioEngine.seek(timeMs, this.lanes, this.triggers);
         this.sequencer.setTime(timeMs);
@@ -342,6 +355,16 @@ export class App {
       onPreviewSample: (lane) => {
         this.audioEngine.playSingleSample(lane);
       },
+      onScrollVertical: (scrollTop) => {
+        if (lanesList) {
+          lanesList.scrollTop = scrollTop;
+        }
+      },
+    });
+
+    // Synchronize vertical scroll from left rack to canvas
+    lanesList?.addEventListener('scroll', () => {
+      this.sequencer.setScrollTop(lanesList.scrollTop);
     });
 
     this.updateSequencerData();
@@ -356,6 +379,7 @@ export class App {
       ghostObjects,
       this.audioEngine.getWaveform()
     );
+    this.audioEngine.updateSchedulerData(this.lanes, this.triggers);
   }
 
   private setupAudioListeners() {
@@ -457,6 +481,16 @@ export class App {
       const ver = (e.target as HTMLSelectElement).value;
       this.referenceBeatmap = this.allBeatmaps.find((bm) => (bm.metadata.Version || '') === ver) || null;
       this.updateSequencerData();
+    });
+
+    // Import from Diff button
+    document.getElementById('btn-import-hs-diff')?.addEventListener('click', () => {
+      if (this.allBeatmaps.length === 0) {
+        alert('No difficulties loaded. Import a beatmap or .osz file first!');
+        return;
+      }
+      const targetBm = this.referenceBeatmap || this.allBeatmaps[0];
+      this.importDiffIntoLanes(targetBm);
     });
 
     // Copier buttons
@@ -574,7 +608,9 @@ export class App {
 
   private renderLanesList() {
     const container = document.getElementById('lanes-list');
+    const titleEl = document.getElementById('rack-lanes-title');
     if (!container) return;
+    if (titleEl) titleEl.textContent = `LANES (${this.lanes.length})`;
 
     container.innerHTML = '';
 
@@ -582,7 +618,7 @@ export class App {
       const lane = this.lanes[i];
       const el = document.createElement('div');
       el.className = 'lane-item';
-      el.style.borderLeft = `4px solid ${lane.color}`;
+      el.style.borderLeftColor = lane.color;
 
       el.innerHTML = `
         <div class="lane-top-row">
@@ -654,25 +690,45 @@ export class App {
       const setSelect = el.querySelector('.lane-sampleset') as HTMLSelectElement;
       setSelect.addEventListener('change', () => {
         lane.sampleSet = setSelect.value as any;
+        this.updateSequencerData();
       });
 
       const addSelect = el.querySelector('.lane-addition') as HTMLSelectElement;
       addSelect.addEventListener('change', () => {
         lane.addition = addSelect.value as any;
+        this.updateSequencerData();
       });
 
       const idxInput = el.querySelector('.lane-custom-idx') as HTMLInputElement;
       idxInput.addEventListener('change', () => {
         lane.customIndex = parseInt(idxInput.value, 10) || 0;
+        this.updateSequencerData();
       });
 
       const volSlider = el.querySelector('.lane-volume') as HTMLInputElement;
       volSlider.addEventListener('input', () => {
         lane.volume = parseInt(volSlider.value, 10) || 0;
+        this.updateSequencerData();
       });
 
       container.appendChild(el);
     }
+  }
+
+  // --- Convert Existing Hitsound Diff into Lanes ---
+
+  public importDiffIntoLanes(beatmap: OsuBeatmap) {
+    const res = importHitsoundsFromBeatmap(beatmap);
+    if (res.lanes.length === 0) {
+      alert('No hitsound notes found in selected difficulty.');
+      return;
+    }
+
+    this.lanes = res.lanes;
+    this.triggers = res.triggers;
+    this.renderLanesList();
+    this.updateSequencerData();
+    alert(`Imported ${res.lanes.length} lanes and ${res.importedNoteCount} hitsound triggers from [${beatmap.metadata.Version || 'Diff'}]!`);
   }
 
   // --- File Ingestion (.osz, .osu, audio) ---
@@ -688,12 +744,15 @@ export class App {
         const parsed = parseOsu(text, file.name);
         this.addBeatmap(parsed);
       } else if (lower.endsWith('.mp3') || lower.endsWith('.ogg') || lower.endsWith('.wav')) {
-        if (lower.includes('hit') || lower.includes('clap') || lower.includes('whistle') || lower.includes('finish')) {
-          // Custom hitsound sample
-          const buf = await this.audioEngine.decodeAudio(await file.arrayBuffer());
-          this.customSamples.set(file.name, buf);
+        if (lower.includes('hit') || lower.includes('clap') || lower.includes('whistle') || lower.includes('finish') || lower.includes('slider')) {
+          try {
+            const buf = await this.audioEngine.decodeSampleAudio(await file.arrayBuffer());
+            this.customSamples.set(file.name.toLowerCase(), buf);
+            this.audioEngine.setCustomSamples(this.customSamples);
+          } catch (e) {
+            console.warn('Could not decode sample:', file.name, e);
+          }
         } else {
-          // Main song audio
           await this.loadSongAudio(file);
         }
       }
@@ -701,62 +760,103 @@ export class App {
   }
 
   public async loadOsz(file: File) {
-    const zip = await JSZip.loadAsync(file);
-    this.rawZipFiles.clear();
-    this.allBeatmaps = [];
+    try {
+      const zip = await JSZip.loadAsync(file);
+      this.rawZipFiles.clear();
+      this.allBeatmaps = [];
+      this.customSamples.clear();
 
-    // First, cache all files
-    for (const [filename, zipEntry] of Object.entries(zip.files)) {
-      if (!zipEntry.dir) {
-        const bytes = await zipEntry.async('uint8array');
-        this.rawZipFiles.set(filename, bytes);
-      }
-    }
+      // Clear any old triggers from demo so mapper starts fresh
+      this.triggers = [];
 
-    // Parse all .osu files
-    for (const [filename, bytes] of this.rawZipFiles.entries()) {
-      if (filename.toLowerCase().endsWith('.osu')) {
-        const text = new TextDecoder('utf-8').decode(bytes);
-        const parsed = parseOsu(text, filename);
-        this.addBeatmap(parsed);
-      }
-    }
-
-    // Identify main song audio
-    let audioName = 'audio.mp3';
-    if (this.allBeatmaps.length > 0) {
-      audioName = this.allBeatmaps[0].general.AudioFilename || 'audio.mp3';
-    }
-
-    // Find audio file in zip
-    for (const [filename, bytes] of this.rawZipFiles.entries()) {
-      if (filename.toLowerCase() === audioName.toLowerCase()) {
-        await this.audioEngine.decodeAudio(bytes.buffer as ArrayBuffer);
-        this.audioFileName = filename;
-        break;
-      }
-    }
-
-    // Check for custom sample wav files in zip
-    for (const [filename, bytes] of this.rawZipFiles.entries()) {
-      if (filename.toLowerCase().endsWith('.wav')) {
-        try {
-          const sampleBuffer = await this.audioEngine.decodeAudio(bytes.buffer as ArrayBuffer);
-          this.customSamples.set(filename.toLowerCase(), sampleBuffer);
-        } catch {
-          // Ignore invalid wav
+      // 1. Extract and store all files as Uint8Array
+      for (const [filename, zipEntry] of Object.entries(zip.files)) {
+        if (!zipEntry.dir) {
+          const bytes = await zipEntry.async('uint8array');
+          this.rawZipFiles.set(filename, bytes);
         }
       }
-    }
 
-    this.updateBeatmapSelectors();
-    this.updateSequencerData();
-    alert(`Loaded mapset with ${this.allBeatmaps.length} difficulties and audio!`);
+      // 2. Parse all .osu files
+      for (const [filename, bytes] of this.rawZipFiles.entries()) {
+        if (filename.toLowerCase().endsWith('.osu')) {
+          const text = new TextDecoder('utf-8').decode(bytes);
+          const parsed = parseOsu(text, filename);
+          this.addBeatmap(parsed);
+        }
+      }
+
+      // 3. Find and decode main song audio
+      let audioName = 'audio.mp3';
+      if (this.allBeatmaps.length > 0) {
+        audioName = this.allBeatmaps[0].general.AudioFilename || 'audio.mp3';
+      }
+
+      let foundSong = false;
+      for (const [filename, bytes] of this.rawZipFiles.entries()) {
+        if (filename.toLowerCase() === audioName.toLowerCase()) {
+          const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          await this.audioEngine.decodeSongAudio(arrayBuf);
+          this.audioFileName = filename;
+          foundSong = true;
+          break;
+        }
+      }
+
+      // If audioName didn't match, fallback to any mp3/ogg not containing 'hit'
+      if (!foundSong) {
+        for (const [filename, bytes] of this.rawZipFiles.entries()) {
+          const lower = filename.toLowerCase();
+          if ((lower.endsWith('.mp3') || lower.endsWith('.ogg')) && !lower.includes('hit')) {
+            const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+            await this.audioEngine.decodeSongAudio(arrayBuf);
+            this.audioFileName = filename;
+            foundSong = true;
+            break;
+          }
+        }
+      }
+
+      // 4. Decode custom hitsound samples (.wav and .ogg)
+      for (const [filename, bytes] of this.rawZipFiles.entries()) {
+        const lower = filename.toLowerCase();
+        if (lower.endsWith('.wav') || lower.endsWith('.ogg')) {
+          try {
+            const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+            const sampleBuffer = await this.audioEngine.decodeSampleAudio(arrayBuf);
+            this.customSamples.set(lower, sampleBuffer);
+          } catch {
+            // Ignore corrupted/unsupported sample
+          }
+        }
+      }
+      this.audioEngine.setCustomSamples(this.customSamples);
+
+      this.updateBeatmapSelectors();
+      this.updateSequencerData();
+
+      // 5. Check if there is an existing [Hitsounds] diff to auto-import
+      const hsDiff = this.allBeatmaps.find(
+        (bm) => (bm.metadata.Version || '').toLowerCase().includes('hitsound') || (bm.metadata.Version || '').toLowerCase() === 'hs'
+      );
+
+      if (hsDiff) {
+        const doImport = confirm(`Found existing hitsound difficulty: "${hsDiff.metadata.Version}" (${hsDiff.hitObjects.length} notes).\n\nDo you want to import its hitsounds into studio lanes?`);
+        if (doImport) {
+          this.importDiffIntoLanes(hsDiff);
+        }
+      } else {
+        alert(`Loaded mapset with ${this.allBeatmaps.length} difficulties!`);
+      }
+    } catch (err) {
+      console.error('Error importing .osz:', err);
+      alert(`Failed to import .osz: ${err}`);
+    }
   }
 
   private async loadSongAudio(file: File) {
     const arrayBuffer = await file.arrayBuffer();
-    await this.audioEngine.decodeAudio(arrayBuffer);
+    await this.audioEngine.decodeSongAudio(arrayBuffer);
     this.audioFileName = file.name;
     this.updateSequencerData();
   }
@@ -805,10 +905,12 @@ export class App {
     container.innerHTML = '';
     for (const bm of this.allBeatmaps) {
       const ver = bm.metadata.Version || bm.fileName;
+      // Default hitsound diff uncheck, playables check
+      const isHs = ver.toLowerCase().includes('hitsound');
       const row = document.createElement('label');
       row.className = 'checkbox-label target-row';
       row.innerHTML = `
-        <input type="checkbox" class="target-diff-cb" value="${bm.fileName}" checked>
+        <input type="checkbox" class="target-diff-cb" value="${bm.fileName}" ${!isHs ? 'checked' : ''}>
         <span><strong>${ver}</strong> (${bm.hitObjects.length} objects)</span>
       `;
       container.appendChild(row);
@@ -903,7 +1005,7 @@ export class App {
     if (saveAsOsz) {
       const zip = new JSZip();
 
-      // Copy existing files
+      // Copy existing files (images, audio, etc.)
       for (const [fname, bytes] of this.rawZipFiles.entries()) {
         zip.file(fname, bytes);
       }
@@ -950,7 +1052,6 @@ export class App {
   // --- Built-in Demo Generator ---
 
   public loadDemoProject() {
-    // Generate a lively 175 BPM demo song procedurally into WebAudio!
     const ctx = this.audioEngine.getContext();
     const sampleRate = ctx.sampleRate;
     const duration = 24; // 24 seconds demo loop
@@ -962,7 +1063,6 @@ export class App {
     const bpm = 175;
     const beatSec = 60 / bpm;
 
-    // Synthesize a rhythmic synth-pop / anime progression (Em - C - G - D)
     const chords = [
       [164.81, 196.0, 246.94], // Em
       [130.81, 164.81, 196.0],  // C
@@ -976,18 +1076,15 @@ export class App {
       const chordIdx = Math.floor(beatIdx / 4) % chords.length;
       const chord = chords[chordIdx];
 
-      // Bass arp
       const arpNote = chord[beatIdx % 3] / 2;
       const bassEnv = Math.exp(-(t % (beatSec / 2)) * 12);
       const bass = Math.sin(2 * Math.PI * arpNote * t) * bassEnv * 0.4;
 
-      // Chord pad
       let pad = 0;
       for (const note of chord) {
         pad += Math.sin(2 * Math.PI * note * t) * 0.08;
       }
 
-      // Drum groove (Kick on 1 & 3, Snare on 2 & 4)
       const beatPhase = (t % beatSec) / beatSec;
       const isKickBeat = beatIdx % 2 === 0;
       const isSnareBeat = beatIdx % 2 === 1;
@@ -1012,7 +1109,7 @@ export class App {
     this.timingPoints = [
       {
         time: 0,
-        beatLength: (60 / bpm) * 1000, // 342.857ms
+        beatLength: (60 / bpm) * 1000,
         meter: 4,
         sampleSet: 2,
         sampleIndex: 0,
@@ -1022,14 +1119,12 @@ export class App {
       },
     ];
 
-    // Create a demo reference beatmap with standard jump circles and sliders
     const demoHitObjects: HitObject[] = [];
     const beatMs = (60 / bpm) * 1000;
 
     for (let b = 0; b < 64; b++) {
       const time = Math.round(b * beatMs);
       if (b % 4 === 2) {
-        // Slider
         demoHitObjects.push({
           x: 200 + (b % 8) * 20,
           y: 150 + (b % 4) * 20,
@@ -1042,7 +1137,6 @@ export class App {
           rawString: '',
         });
       } else {
-        // Circle
         demoHitObjects.push({
           x: 100 + (b % 8) * 35,
           y: 120 + (b % 6) * 30,
@@ -1078,13 +1172,13 @@ export class App {
     this.allBeatmaps = [demoBeatmap, normalBeatmap];
     this.referenceBeatmap = demoBeatmap;
 
-    // Place initial sample triggers (Clap on 2 & 4, Kick on 1 & 3, Whistle on melody)
+    // Place initial sample triggers starting from beat 1 (avoid beat 0 drum surprise)
     this.triggers = [];
     const clapLane = this.lanes.find((l) => l.addition === 'Clap') || this.lanes[0];
     const kickLane = this.lanes.find((l) => l.name.includes('Kick')) || this.lanes[3];
     const whistleLane = this.lanes.find((l) => l.addition === 'Whistle') || this.lanes[1];
 
-    for (let b = 0; b < 32; b++) {
+    for (let b = 1; b < 32; b++) {
       const t = Math.round(b * beatMs);
       if (b % 2 === 0) {
         this.triggers.push({ id: `tr-k-${b}`, laneId: kickLane.id, time: t });
@@ -1098,6 +1192,6 @@ export class App {
 
     this.updateBeatmapSelectors();
     this.updateSequencerData();
-    alert('Demo loaded! Press Space to Play, place or remove triggers on the grid, and test the Copier.');
+    alert('Demo loaded! Press Space to Play, Ctrl+Drag to paint notes, and test the Copier.');
   }
 }
