@@ -161,7 +161,7 @@ export class App {
 
             <div class="transport-group">
               <label>Zoom:</label>
-              <input type="range" id="slider-zoom" min="50" max="400" value="140" class="range-slider">
+              <input type="range" id="slider-zoom" min="30" max="3000" value="220" class="range-slider">
             </div>
 
             <div class="transport-group volumes">
@@ -362,6 +362,10 @@ export class App {
           lanesList.scrollTop = scrollTop;
         }
       },
+      onZoomChange: (newZoom) => {
+        const slider = document.getElementById('slider-zoom') as HTMLInputElement;
+        if (slider) slider.value = String(Math.round(newZoom));
+      },
     });
 
     // Synchronize vertical scroll from left rack to canvas
@@ -370,6 +374,25 @@ export class App {
     });
 
     this.updateSequencerData();
+  }
+
+  private animFrameId: number | null = null;
+
+  private startPlaybackLoop() {
+    if (this.animFrameId !== null) {
+      cancelAnimationFrame(this.animFrameId);
+    }
+    const tick = () => {
+      if (this.audioEngine.isAudioPlaying()) {
+        const cur = this.audioEngine.getCurrentTimeMs();
+        this.sequencer.setTime(cur, true);
+        this.updateTimeDisplay(cur);
+        this.animFrameId = requestAnimationFrame(tick);
+      } else {
+        this.animFrameId = null;
+      }
+    };
+    this.animFrameId = requestAnimationFrame(tick);
   }
 
   private updateSequencerData() {
@@ -386,7 +409,7 @@ export class App {
 
   private setupAudioListeners() {
     this.audioEngine.onTimeUpdate = (timeMs) => {
-      this.sequencer.setTime(timeMs);
+      this.sequencer.setTime(timeMs, true);
       this.updateTimeDisplay(timeMs);
     };
 
@@ -394,6 +417,12 @@ export class App {
       const icon = document.getElementById('play-icon');
       if (icon) {
         icon.textContent = isPlaying ? '⏸' : '▶';
+      }
+      if (isPlaying) {
+        this.startPlaybackLoop();
+      } else if (this.animFrameId !== null) {
+        cancelAnimationFrame(this.animFrameId);
+        this.animFrameId = null;
       }
     };
   }
@@ -771,6 +800,10 @@ export class App {
   public resetProject() {
     if (this.audioEngine.isAudioPlaying()) {
       this.audioEngine.pause();
+    }
+    if (this.animFrameId !== null) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = null;
     }
     this.audioEngine.seek(0, [], []);
     this.audioEngine.clear();

@@ -7,6 +7,7 @@ export interface SequencerEvents {
   onSeek: (timeMs: number) => void;
   onPreviewSample: (lane: Lane) => void;
   onScrollVertical: (scrollTop: number) => void;
+  onZoomChange?: (newZoom: number) => void;
 }
 
 export class Sequencer {
@@ -23,11 +24,12 @@ export class Sequencer {
   private durationMs = 0;
 
   // Exact Layout Dimensions matching the Left Channel Rack
-  public zoomPxPerSec = 140; // Horizontal zoom
+  public zoomPxPerSec = 220; // Horizontal zoom
   public scrollLeftMs = 0; // Current view start in ms
   public scrollTopPx = 0; // Vertical scroll
   public laneHeight = 58; // Exactly matches HTML lane card height
   public rulerHeight = 64; // Exactly matches left rack header height
+  public scrollbarHeight = 14; // Bottom overview scrollbar height
   public currentTimeMs = 0;
   public activeSnapDivisor = 4; // 1/4 default
   public followPlayhead = true;
@@ -39,6 +41,12 @@ export class Sequencer {
   private isBoxSelecting = false;
   private isPainting = false;
   private isErasing = false;
+  private isPanning = false;
+  private isDraggingScrollbar = false;
+  private panStartX = 0;
+  private panStartY = 0;
+  private panStartScrollLeft = 0;
+  private panStartScrollTop = 0;
   private selectionStart = { x: 0, y: 0 };
   private selectionCurrent = { x: 0, y: 0 };
 
@@ -85,7 +93,7 @@ export class Sequencer {
     this.render();
   }
 
-  public setTime(timeMs: number) {
+  public setTime(timeMs: number, triggerRender: boolean = true) {
     this.currentTimeMs = timeMs;
 
     if (this.followPlayhead) {
@@ -95,7 +103,9 @@ export class Sequencer {
       }
     }
 
-    this.render();
+    if (triggerRender) {
+      this.render();
+    }
   }
 
   public setScrollTop(scrollTop: number) {
@@ -109,7 +119,7 @@ export class Sequencer {
   }
 
   public setZoom(zoom: number) {
-    this.zoomPxPerSec = Math.max(40, Math.min(600, zoom));
+    this.zoomPxPerSec = Math.max(20, Math.min(4000, zoom));
     this.render();
   }
 
@@ -181,15 +191,16 @@ export class Sequencer {
 
     const viewStartMs = this.scrollLeftMs;
     const viewEndMs = this.pxToMs(width);
+    const trackAreaHeight = Math.max(0, height - this.rulerHeight - this.scrollbarHeight);
 
-    // 1. Draw Lane rows in scrollable area (clipped under ruler)
+    // 1. Draw Lane rows in scrollable area (clipped between ruler and bottom scrollbar)
     this.ctx.save();
     this.ctx.beginPath();
-    this.ctx.rect(0, this.rulerHeight, width, height - this.rulerHeight);
+    this.ctx.rect(0, this.rulerHeight, width, trackAreaHeight);
     this.ctx.clip();
 
-    this.renderLaneRows(width, height);
-    this.renderGrid(viewStartMs, viewEndMs, height);
+    this.renderLaneRows(width, height - this.scrollbarHeight);
+    this.renderGrid(viewStartMs, viewEndMs, height - this.scrollbarHeight);
     this.renderGhostObjects(viewStartMs, viewEndMs);
     this.renderTriggers(viewStartMs, viewEndMs);
 
@@ -203,8 +214,11 @@ export class Sequencer {
     // 2. Draw Sticky Top Timeline Ruler & Waveform (always on top)
     this.renderRulerAndWaveform(width, viewStartMs, viewEndMs);
 
-    // 3. Draw Playhead
-    this.renderPlayhead(height);
+    // 3. Draw Bottom Overview Scrollbar
+    this.renderBottomScrollbar(width, height);
+
+    // 4. Draw Playhead
+    this.renderPlayhead(height - this.scrollbarHeight);
   }
 
   private renderRulerAndWaveform(width: number, viewStartMs: number, viewEndMs: number) {
@@ -259,16 +273,44 @@ export class Sequencer {
     // Measure & Beat ticks on ruler
     const redLines = this.timingPoints.filter((tp) => tp.uninherited);
     if (redLines.length > 0) {
-      for (const rl of redLines) {
+      let cumulativeMeasure = 0;
+
+      for (let i = 0; i < redLines.length; i++) {
+        const rl = redLines[i];
+        const nextRl = redLines[i + 1];
+        const segmentEndMs = nextRl ? nextRl.time : Math.max(viewEndMs, this.durationMs);
+
         const beatLength = rl.beatLength;
         const meter = rl.meter || 4;
         const measureMs = beatLength * meter;
+        const measuresInSegment = Math.max(1, Math.round((segmentEndMs - rl.time) / measureMs));
 
-        const startMeasure = Math.floor((viewStartMs - rl.time) / measureMs);
-        const endMeasure = Math.ceil((viewEndMs - rl.time) / measureMs);
+        // Skip timing segments that are entirely out of view
+        if (segmentEndMs < viewStartMs || rl.time > viewEndMs) {
+          cumulativeMeasure += measuresInSegment;
+          continue;
+        }
 
-        for (let m = startMeasure; m <= endMeasure; m++) {
+        const segStartMs = Math.max(rl.time, viewStartMs);
+        const segEndMs = Math.min(segmentEndMs, viewEndMs);
+
+        const startM = Math.max(0, Math.floor((segStartMs - rl.time) / measureMs));
+        const endM = Math.min(measuresInSegment, Math.ceil((segEndMs - rl.time) / measureMs));
+
+        // Dynamic density to strictly prevent text collision
+        const measurePx = (measureMs / 1000) * this.zoomPxPerSec;
+        let labelStep = 1;
+        if (measurePx < 55) labelStep = 2;
+        if (measurePx < 28) labelStep = 4;
+        if (measurePx < 14) labelStep = 8;
+        if (measurePx < 7) labelStep = 16;
+        if (measurePx < 3.5) labelStep = 32;
+
+        let lastDrawnX = -9999;
+
+        for (let m = startM; m <= endM; m++) {
           const mTime = rl.time + m * measureMs;
+          if (mTime > segmentEndMs) break;
           if (mTime < viewStartMs || mTime > viewEndMs) continue;
 
           const x = Math.round(this.msToPx(mTime)) + 0.5;
@@ -281,17 +323,26 @@ export class Sequencer {
           this.ctx.lineTo(x, rulerH);
           this.ctx.stroke();
 
-          // Measure text label
-          this.ctx.fillStyle = '#8ab4f8';
-          this.ctx.font = 'bold 12px monospace';
-          this.ctx.fillText(`${m + 1}`, x + 5, 20);
+          // Only draw text if spaced enough and matches step
+          const measureNum = cumulativeMeasure + m + 1;
+          const isMajor = (m % labelStep === 0);
+          if (isMajor && (x > lastDrawnX + 50)) {
+            // Measure text label
+            this.ctx.fillStyle = '#8ab4f8';
+            this.ctx.font = 'bold 12px monospace';
+            this.ctx.fillText(`${measureNum}`, x + 5, 20);
 
-          // Millisecond label
-          const sec = (mTime / 1000).toFixed(2);
-          this.ctx.fillStyle = '#7a869a';
-          this.ctx.font = '10px monospace';
-          this.ctx.fillText(`${sec}s`, x + 5, 34);
+            // Millisecond label
+            const sec = (mTime / 1000).toFixed(2);
+            this.ctx.fillStyle = '#7a869a';
+            this.ctx.font = '10px monospace';
+            this.ctx.fillText(`${sec}s`, x + 5, 34);
+
+            lastDrawnX = x;
+          }
         }
+
+        cumulativeMeasure += measuresInSegment;
       }
     }
   }
@@ -457,7 +508,8 @@ export class Sequencer {
       laneIndexMap.set(this.lanes[i].id, i);
     }
 
-    const triggerW = Math.max(10, this.zoomPxPerSec * 0.065);
+    // Dynamic width with strict margin so notes never overlap in dense streams
+    const triggerW = Math.max(6, Math.min(26, this.zoomPxPerSec * 0.035));
 
     for (const tr of this.triggers) {
       if (tr.time < viewStartMs - 500 || tr.time > viewEndMs + 500) continue;
@@ -466,7 +518,7 @@ export class Sequencer {
       if (lIdx === undefined) continue;
 
       const lane = this.lanes[lIdx];
-      const x = this.msToPx(tr.time) - triggerW / 2;
+      const x = Math.round(this.msToPx(tr.time) - triggerW / 2);
       const y = this.rulerHeight - this.scrollTopPx + lIdx * this.laneHeight + 6;
       const h = this.laneHeight - 12;
 
@@ -496,6 +548,45 @@ export class Sequencer {
         this.ctx.fillRect(x + 2, y + 2, triggerW - 4, 2);
       }
     }
+  }
+
+  private renderBottomScrollbar(width: number, height: number) {
+    const barY = height - this.scrollbarHeight;
+
+    // Track
+    this.ctx.fillStyle = '#0a0c10';
+    this.ctx.fillRect(0, barY, width, this.scrollbarHeight);
+
+    this.ctx.strokeStyle = '#1e2330';
+    this.ctx.lineWidth = 1;
+    this.ctx.beginPath();
+    this.ctx.moveTo(0, barY + 0.5);
+    this.ctx.lineTo(width, barY + 0.5);
+    this.ctx.stroke();
+
+    const viewDurationMs = (width / this.zoomPxPerSec) * 1000;
+    const totalMs = Math.max(viewDurationMs, this.durationMs);
+
+    const thumbW = Math.max(30, (viewDurationMs / totalMs) * width);
+    const maxScrollMs = Math.max(0, totalMs - viewDurationMs);
+    const thumbX = maxScrollMs > 0 ? (this.scrollLeftMs / maxScrollMs) * (width - thumbW) : 0;
+
+    // Thumb
+    this.ctx.fillStyle = this.isDraggingScrollbar ? '#4a9eff' : 'rgba(255, 255, 255, 0.28)';
+    this.ctx.beginPath();
+    this.ctx.roundRect(thumbX, barY + 2, thumbW, this.scrollbarHeight - 4, 3);
+    this.ctx.fill();
+  }
+
+  private handleScrollbarClick(clickX: number, width: number) {
+    const viewDurationMs = (width / this.zoomPxPerSec) * 1000;
+    const totalMs = Math.max(viewDurationMs, this.durationMs);
+    const thumbW = Math.max(30, (viewDurationMs / totalMs) * width);
+    const maxScrollMs = Math.max(0, totalMs - viewDurationMs);
+
+    const targetRatio = Math.max(0, Math.min(1, (clickX - thumbW / 2) / (width - thumbW)));
+    this.scrollLeftMs = targetRatio * maxScrollMs;
+    this.render();
   }
 
   private renderSelectionBox() {
@@ -543,7 +634,7 @@ export class Sequencer {
     this.canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    // Delete selected triggers with Delete / Backspace
+    // Shortcuts: Delete triggers, Zoom +/-, PageUp/PageDown
     window.addEventListener('keydown', (e) => {
       if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'SELECT') {
         return;
@@ -555,6 +646,24 @@ export class Sequencer {
           this.selectedTriggerIds.clear();
           this.render();
         }
+      } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        this.setZoom(this.zoomPxPerSec * 1.25);
+        if (this.events.onZoomChange) this.events.onZoomChange(this.zoomPxPerSec);
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        this.setZoom(this.zoomPxPerSec * 0.8);
+        if (this.events.onZoomChange) this.events.onZoomChange(this.zoomPxPerSec);
+      } else if (e.code === 'PageUp') {
+        e.preventDefault();
+        const viewDurationMs = (this.canvas.getBoundingClientRect().width / this.zoomPxPerSec) * 1000;
+        this.scrollLeftMs = Math.max(0, this.scrollLeftMs - viewDurationMs * 0.75);
+        this.render();
+      } else if (e.code === 'PageDown') {
+        e.preventDefault();
+        const viewDurationMs = (this.canvas.getBoundingClientRect().width / this.zoomPxPerSec) * 1000;
+        this.scrollLeftMs = Math.max(0, this.scrollLeftMs + viewDurationMs * 0.75);
+        this.render();
       }
     });
   }
@@ -564,8 +673,37 @@ export class Sequencer {
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
 
+    // Bottom scrollbar interaction
+    if (clickY >= rect.height - this.scrollbarHeight) {
+      this.isDraggingScrollbar = true;
+      this.handleScrollbarClick(clickX, rect.width);
+      return;
+    }
+
+    // Middle Click OR Alt + Left Click -> Hand Pan Tool
+    if (e.button === 1 || (e.altKey && e.button === 0)) {
+      this.isPanning = true;
+      this.panStartX = e.clientX;
+      this.panStartY = e.clientY;
+      this.panStartScrollLeft = this.scrollLeftMs;
+      this.panStartScrollTop = this.scrollTopPx;
+      this.canvas.style.cursor = 'grabbing';
+      return;
+    }
+
+    // Top Ruler interaction
     if (clickY <= this.rulerHeight) {
-      // Scrub timeline on ruler
+      if (e.button === 2) {
+        // Right click on ruler: pan horizontally
+        this.isPanning = true;
+        this.panStartX = e.clientX;
+        this.panStartY = e.clientY;
+        this.panStartScrollLeft = this.scrollLeftMs;
+        this.panStartScrollTop = this.scrollTopPx;
+        this.canvas.style.cursor = 'grabbing';
+        return;
+      }
+      // Left click on ruler: scrub timeline
       this.isScrubbingRuler = true;
       const targetTime = Math.max(0, this.pxToMs(clickX));
       this.events.onSeek(targetTime);
@@ -640,6 +778,23 @@ export class Sequencer {
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
+    if (this.isDraggingScrollbar) {
+      this.handleScrollbarClick(mouseX, rect.width);
+      return;
+    }
+
+    if (this.isPanning) {
+      const dx = e.clientX - this.panStartX;
+      const dy = e.clientY - this.panStartY;
+      const deltaMs = (dx / this.zoomPxPerSec) * 1000;
+      this.scrollLeftMs = Math.max(0, this.panStartScrollLeft - deltaMs);
+      const maxScrollTop = Math.max(0, this.lanes.length * this.laneHeight - (rect.height - this.rulerHeight - this.scrollbarHeight));
+      this.scrollTopPx = Math.max(0, Math.min(maxScrollTop, this.panStartScrollTop - dy));
+      this.events.onScrollVertical(this.scrollTopPx);
+      this.render();
+      return;
+    }
+
     if (this.isScrubbingRuler) {
       const targetTime = Math.max(0, this.pxToMs(mouseX));
       this.events.onSeek(targetTime);
@@ -672,7 +827,13 @@ export class Sequencer {
     this.isScrubbingRuler = false;
     this.isPainting = false;
     this.isErasing = false;
+    this.isDraggingScrollbar = false;
     this.lastPaintedCell = null;
+
+    if (this.isPanning) {
+      this.isPanning = false;
+      this.canvas.style.cursor = '';
+    }
 
     if (this.isBoxSelecting) {
       this.isBoxSelecting = false;
@@ -753,29 +914,54 @@ export class Sequencer {
   private onWheel(e: WheelEvent) {
     e.preventDefault();
 
-    if (e.ctrlKey) {
-      // Zoom centered at mouse cursor
+    // 1. Zoom with Ctrl + Wheel OR Alt + Wheel
+    if (e.ctrlKey || e.altKey) {
       const rect = this.canvas.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
       const mouseTime = this.pxToMs(mouseX);
 
-      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
-      const newZoom = Math.max(40, Math.min(600, this.zoomPxPerSec * zoomFactor));
+      const zoomFactor = e.deltaY < 0 ? 1.18 : 0.82;
+      const newZoom = Math.max(20, Math.min(4000, this.zoomPxPerSec * zoomFactor));
 
       this.zoomPxPerSec = newZoom;
       this.scrollLeftMs = Math.max(0, mouseTime - (mouseX / newZoom) * 1000);
+      if (this.events.onZoomChange) {
+        this.events.onZoomChange(newZoom);
+      }
       this.render();
-    } else if (e.shiftKey) {
-      // Shift + Wheel = Horizontal scroll
-      const deltaMs = (e.deltaY / this.zoomPxPerSec) * 300;
+      return;
+    }
+
+    // 2. Horizontal scroll with Shift + Wheel
+    if (e.shiftKey) {
+      const deltaMs = (e.deltaY / this.zoomPxPerSec) * 600;
       this.scrollLeftMs = Math.max(0, this.scrollLeftMs + deltaMs);
       this.render();
-    } else {
-      // Vertical scroll (synchronized with left rack)
-      const maxScrollTop = Math.max(0, this.lanes.length * this.laneHeight - (this.canvas.height / (window.devicePixelRatio || 1) - this.rulerHeight));
-      this.scrollTopPx = Math.max(0, Math.min(maxScrollTop, this.scrollTopPx + e.deltaY));
-      this.events.onScrollVertical(this.scrollTopPx);
-      this.render();
+      return;
     }
+
+    // 3. Trackpad 2-finger horizontal swipe or horizontal mouse wheel
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      const deltaMs = (e.deltaX / this.zoomPxPerSec) * 800;
+      this.scrollLeftMs = Math.max(0, this.scrollLeftMs + deltaMs);
+      this.render();
+      return;
+    }
+
+    // 4. Mouse wheel on Ruler bar -> horizontal timeline scroll
+    const rect = this.canvas.getBoundingClientRect();
+    const mouseY = e.clientY - rect.top;
+    if (mouseY <= this.rulerHeight) {
+      const deltaMs = (e.deltaY / this.zoomPxPerSec) * 600;
+      this.scrollLeftMs = Math.max(0, this.scrollLeftMs + deltaMs);
+      this.render();
+      return;
+    }
+
+    // 5. Normal Wheel on track grid -> vertical track scroll
+    const maxScrollTop = Math.max(0, this.lanes.length * this.laneHeight - (rect.height - this.rulerHeight - this.scrollbarHeight));
+    this.scrollTopPx = Math.max(0, Math.min(maxScrollTop, this.scrollTopPx + e.deltaY));
+    this.events.onScrollVertical(this.scrollTopPx);
+    this.render();
   }
 }
