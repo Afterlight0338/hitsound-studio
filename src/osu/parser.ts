@@ -123,6 +123,17 @@ export function parseOsu(content: string, fileName: string = 'beatmap.osu'): Osu
   // Ensure timing points are sorted chronologically
   timingPoints.sort((a, b) => a.time - b.time || (a.uninherited === b.uninherited ? 0 : a.uninherited ? -1 : 1));
 
+  // Compute exact slider edge times and end times for all hit objects
+  const sliderMultiplier = parseFloat(difficulty.SliderMultiplier || '1.4') || 1.4;
+  for (const ho of hitObjects) {
+    if ((ho.type & 2) !== 0) {
+      ho.edgeTimes = calculateSliderEdgeTimes(ho, timingPoints, sliderMultiplier);
+      ho.endTime = ho.edgeTimes[ho.edgeTimes.length - 1];
+    } else if ((ho.type & 8) !== 0) {
+      ho.endTime = ho.endTime || ho.time + 1000;
+    }
+  }
+
   return {
     version,
     general,
@@ -136,6 +147,55 @@ export function parseOsu(content: string, fileName: string = 'beatmap.osu'): Osu
     rawText: content,
     fileName,
   };
+}
+
+/**
+ * Calculates exact slider edge timestamps based on active uninherited timing point (BPM),
+ * active inherited timing point (SV), and the beatmap SliderMultiplier.
+ */
+export function calculateSliderEdgeTimes(
+  ho: HitObject,
+  timingPoints: TimingPoint[],
+  sliderMultiplier: number = 1.4
+): number[] {
+  const slides = ho.slides || 1;
+  const length = ho.length || 0;
+  if (length <= 0) {
+    return Array(slides + 1).fill(ho.time);
+  }
+
+  // 1. Find active uninherited red line at or before slider head
+  let activeRedBeatLength = 500; // default 120 bpm
+  for (const tp of timingPoints) {
+    if (tp.uninherited && tp.time <= ho.time) {
+      activeRedBeatLength = tp.beatLength;
+    }
+  }
+
+  // 2. Find active SV multiplier at slider head
+  let svMultiplier = 1.0;
+  for (const tp of timingPoints) {
+    if (tp.time <= ho.time) {
+      if (tp.uninherited) {
+        svMultiplier = 1.0; // Red line resets SV
+      } else {
+        const val = -100 / tp.beatLength;
+        svMultiplier = Math.max(0.1, Math.min(10, isNaN(val) ? 1.0 : val));
+      }
+    } else {
+      break;
+    }
+  }
+
+  const pixelsPerBeat = sliderMultiplier * 100 * svMultiplier;
+  const totalDuration = ((length * slides) / pixelsPerBeat) * activeRedBeatLength;
+  const slideDuration = totalDuration / slides;
+
+  const edgeTimes: number[] = [];
+  for (let i = 0; i <= slides; i++) {
+    edgeTimes.push(Math.round(ho.time + i * slideDuration));
+  }
+  return edgeTimes;
 }
 
 export function parseHitSample(sampleStr: string): HitSample {

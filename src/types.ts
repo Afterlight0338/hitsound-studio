@@ -58,6 +58,7 @@ export interface HitObject {
   length?: number;
   edgeSounds?: number[];
   edgeSets?: string[];
+  edgeTimes?: number[];
   // Raw extras & hitSample
   hitSample?: HitSample;
   rawString: string;

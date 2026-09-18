@@ -1,4 +1,5 @@
 import type { CopierOptions, HitObject, OsuBeatmap, TimingPoint } from '../types';
+import { calculateSliderEdgeTimes } from './parser';
 import { serializeOsu } from './serializer';
 
 export interface CopyResult {
@@ -49,39 +50,8 @@ export function copyHitsounds(
 
     const sliderMultiplier = parseFloat(target.difficulty.SliderMultiplier || '1.4') || 1.4;
 
-    // Helper to calculate slider duration
-    function calculateSliderEdgeTimes(ho: HitObject): number[] {
-      const slides = ho.slides || 1;
-      const length = ho.length || 0;
-      if (length <= 0) return [ho.time];
-
-      // Find active red line
-      let activeRedBeatLength = 500; // 120 bpm fallback
-      for (const tp of target.timingPoints) {
-        if (tp.uninherited && tp.time <= ho.time) {
-          activeRedBeatLength = tp.beatLength;
-        }
-      }
-
-      // Find active green line
-      let svMultiplier = 1.0;
-      for (const tp of target.timingPoints) {
-        if (tp.time <= ho.time) {
-          if (!tp.uninherited) {
-            svMultiplier = Math.max(0.1, Math.min(10, -100 / tp.beatLength));
-          }
-        }
-      }
-
-      const pixelsPerBeat = sliderMultiplier * 100 * svMultiplier;
-      const totalDuration = ((length * slides) / pixelsPerBeat) * activeRedBeatLength;
-      const slideDuration = totalDuration / slides;
-
-      const edgeTimes: number[] = [];
-      for (let i = 0; i <= slides; i++) {
-        edgeTimes.push(Math.round(ho.time + i * slideDuration));
-      }
-      return edgeTimes;
+    function getSliderEdgeTimes(ho: HitObject): number[] {
+      return ho.edgeTimes || calculateSliderEdgeTimes(ho, target.timingPoints, sliderMultiplier);
     }
 
     for (const ho of newHitObjects) {
@@ -118,7 +88,7 @@ export function copyHitsounds(
           }
         }
       } else if (isSlider) {
-        const edgeTimes = calculateSliderEdgeTimes(ho);
+        const edgeTimes = getSliderEdgeTimes(ho);
         const slides = ho.slides || 1;
 
         if (!ho.edgeSounds) {

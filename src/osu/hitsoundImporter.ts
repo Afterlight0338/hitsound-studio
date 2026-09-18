@@ -1,4 +1,5 @@
 import type { Lane, OsuBeatmap, SampleSetType, Trigger } from '../types';
+import { calculateSliderEdgeTimes } from './parser';
 
 export interface ImportHitsoundsResult {
   lanes: Lane[];
@@ -208,11 +209,17 @@ export function importHitsoundsFromBeatmap(
       const edgeSets = ho.edgeSets || [];
       const slides = ho.slides || 1;
 
-      const duration = (ho.endTime || ho.time + 300) - ho.time;
-      const slideDur = duration / Math.max(1, slides);
+      const sliderMult = parseFloat(beatmap.difficulty?.SliderMultiplier || '1.4') || 1.4;
+      const edgeTimes =
+        ho.edgeTimes && ho.edgeTimes.length >= edgeSounds.length
+          ? ho.edgeTimes
+          : calculateSliderEdgeTimes(ho, beatmap.timingPoints, sliderMult);
 
       for (let i = 0; i < edgeSounds.length; i++) {
-        const edgeTime = Math.round(ho.time + i * slideDur);
+        const edgeTime =
+          edgeTimes[i] !== undefined
+            ? edgeTimes[i]
+            : Math.round(ho.time + (i * ((edgeTimes[edgeTimes.length - 1] ?? ho.time) - ho.time)) / Math.max(1, slides));
         const edgeHs = edgeSounds[i] || 0;
 
         let nSet = 0;

@@ -377,7 +377,7 @@ export class Sequencer {
     // Measure & Beat ticks on ruler
     const redLines = this.timingPoints.filter((tp) => tp.uninherited);
     if (redLines.length > 0) {
-      let cumulativeMeasure = 0;
+      let cumulativeBeats = 0;
 
       for (let i = 0; i < redLines.length; i++) {
         const rl = redLines[i];
@@ -387,11 +387,12 @@ export class Sequencer {
         const beatLength = rl.beatLength;
         const meter = rl.meter || 4;
         const measureMs = beatLength * meter;
-        const measuresInSegment = Math.max(1, Math.round((segmentEndMs - rl.time) / measureMs));
+        const segmentDur = segmentEndMs - rl.time;
+        const beatsInSegment = Math.max(1, Math.round(segmentDur / beatLength));
 
         // Skip timing segments that are entirely out of view
         if (segmentEndMs < viewStartMs || rl.time > viewEndMs) {
-          cumulativeMeasure += measuresInSegment;
+          cumulativeBeats += beatsInSegment;
           continue;
         }
 
@@ -399,7 +400,7 @@ export class Sequencer {
         const segEndMs = Math.min(segmentEndMs, viewEndMs);
 
         const startM = Math.max(0, Math.floor((segStartMs - rl.time) / measureMs));
-        const endM = Math.min(measuresInSegment, Math.ceil((segEndMs - rl.time) / measureMs));
+        const endM = Math.ceil((segEndMs - rl.time) / measureMs);
 
         // Dynamic density to strictly prevent text collision
         const measurePx = (measureMs / 1000) * this.zoomPxPerSec;
@@ -428,7 +429,7 @@ export class Sequencer {
           this.ctx.stroke();
 
           // Only draw text if spaced enough and matches step
-          const measureNum = cumulativeMeasure + m + 1;
+          const measureNum = 1 + Math.floor((cumulativeBeats + m * meter) / meter);
           const isMajor = (m % labelStep === 0);
           if (isMajor && (x > lastDrawnX + 50)) {
             // Measure text label
@@ -446,7 +447,7 @@ export class Sequencer {
           }
         }
 
-        cumulativeMeasure += measuresInSegment;
+        cumulativeBeats += beatsInSegment;
       }
 
       // Draw Red Timing Lines (BPM Changes) on Ruler
@@ -577,18 +578,34 @@ export class Sequencer {
         const isMeasure = b % (this.activeSnapDivisor * meter) === 0;
         const isWholeBeat = b % this.activeSnapDivisor === 0;
         const isHalfBeat = (b * 2) % this.activeSnapDivisor === 0;
+        const isQuarterBeat = (b * 4) % this.activeSnapDivisor === 0;
+        const isTripletBeat = (b * 3) % this.activeSnapDivisor === 0;
+        const isSextupletBeat = (b * 6) % this.activeSnapDivisor === 0;
+        const isEighthBeat = (b * 8) % this.activeSnapDivisor === 0;
 
         if (isMeasure) {
-          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.32)';
+          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
           this.ctx.lineWidth = 1.5;
         } else if (isWholeBeat) {
-          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
           this.ctx.lineWidth = 1;
         } else if (isHalfBeat) {
-          this.ctx.strokeStyle = 'rgba(100, 180, 255, 0.1)';
+          this.ctx.strokeStyle = 'rgba(255, 80, 80, 0.40)'; // 1/2 beat (Red)
+          this.ctx.lineWidth = 1;
+        } else if (isQuarterBeat) {
+          this.ctx.strokeStyle = 'rgba(64, 180, 255, 0.32)'; // 1/4 beat (Cyan)
+          this.ctx.lineWidth = 1;
+        } else if (isTripletBeat) {
+          this.ctx.strokeStyle = 'rgba(190, 100, 255, 0.35)'; // 1/3 beat (Purple)
+          this.ctx.lineWidth = 1;
+        } else if (isSextupletBeat) {
+          this.ctx.strokeStyle = 'rgba(255, 90, 200, 0.28)'; // 1/6 beat (Magenta)
+          this.ctx.lineWidth = 1;
+        } else if (isEighthBeat) {
+          this.ctx.strokeStyle = 'rgba(255, 210, 50, 0.30)'; // 1/8 beat (Gold)
           this.ctx.lineWidth = 1;
         } else {
-          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+          this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
           this.ctx.lineWidth = 1;
         }
 
@@ -638,15 +655,47 @@ export class Sequencer {
         this.ctx.fillStyle = 'rgba(74, 158, 255, 0.04)';
         this.ctx.fillRect(x, baseY, w, totalLanesHeight);
 
-        // Head and tail guidelines
-        this.ctx.strokeStyle = 'rgba(74, 158, 255, 0.2)';
+        // Head guideline
+        this.ctx.strokeStyle = 'rgba(74, 158, 255, 0.25)';
         this.ctx.lineWidth = 1;
         this.ctx.beginPath();
         this.ctx.moveTo(x, baseY);
         this.ctx.lineTo(x, baseY + totalLanesHeight);
-        this.ctx.moveTo(endX, baseY);
-        this.ctx.lineTo(endX, baseY + totalLanesHeight);
         this.ctx.stroke();
+
+        // Edge / repeat guidelines and tail guideline
+        if (ho.edgeTimes && ho.edgeTimes.length > 1) {
+          for (let e = 1; e < ho.edgeTimes.length; e++) {
+            const edgeT = ho.edgeTimes[e];
+            const edgeX = Math.round(this.msToPx(edgeT)) + 0.5;
+            const isTail = e === ho.edgeTimes.length - 1;
+
+            this.ctx.strokeStyle = isTail ? 'rgba(74, 158, 255, 0.25)' : 'rgba(255, 170, 0, 0.35)';
+            this.ctx.beginPath();
+            this.ctx.moveTo(edgeX, baseY);
+            this.ctx.lineTo(edgeX, baseY + totalLanesHeight);
+            this.ctx.stroke();
+
+            if (!isTail) {
+              // Repeat arrow marker at top
+              this.ctx.fillStyle = 'rgba(255, 170, 0, 0.85)';
+              this.ctx.beginPath();
+              this.ctx.moveTo(edgeX, topMarkerY - 4);
+              this.ctx.lineTo(edgeX + 3, topMarkerY);
+              this.ctx.lineTo(edgeX, topMarkerY + 4);
+              this.ctx.lineTo(edgeX - 3, topMarkerY);
+              this.ctx.closePath();
+              this.ctx.fill();
+            }
+          }
+        } else {
+          // Fallback tail guideline
+          this.ctx.strokeStyle = 'rgba(74, 158, 255, 0.25)';
+          this.ctx.beginPath();
+          this.ctx.moveTo(endX, baseY);
+          this.ctx.lineTo(endX, baseY + totalLanesHeight);
+          this.ctx.stroke();
+        }
 
         // Compact pill at top of grid
         this.ctx.fillStyle = 'rgba(74, 158, 255, 0.55)';

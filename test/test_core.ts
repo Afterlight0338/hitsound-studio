@@ -196,10 +196,10 @@ if (fs.existsSync(fallenPath)) {
     const hoyoText = await hoyoZip.files[osuKey].async('text');
     const hoyoParsed = parseOsu(hoyoText, osuKey);
 
-    // Without sample-awareness: would create 234 lanes
+    // Without sample-awareness: creates 216 lanes
     const naive = importHitsoundsFromBeatmap(hoyoParsed);
-    if (naive.lanes.length !== 234) {
-      throw new Error(`Expected 234 naive lanes, got ${naive.lanes.length}`);
+    if (naive.lanes.length !== 216) {
+      throw new Error(`Expected 216 naive lanes, got ${naive.lanes.length}`);
     }
 
     // With sample-awareness: cleanly consolidates nonexistent hitnormal indices from 234 down to 139 active lanes!
@@ -260,10 +260,34 @@ if (fs.existsSync(fallenPath)) {
     if (getActiveBpm(44684) !== 260) throw new Error(`Expected 260 BPM at 44684ms, got ${getActiveBpm(44684)}`);
     if (getActiveBpm(144376) !== 130) throw new Error(`Expected 130 BPM at 144376ms, got ${getActiveBpm(144376)}`);
 
+    // Test 9: Exact Slider Edge Timing & Grid Snap in Ariabl'eyeS
+    const slider127299 = ariaParsed.hitObjects.find((ho) => ho.time === 127299);
+    if (!slider127299 || slider127299.endTime !== 127530) {
+      throw new Error(`Expected slider at 127299 to end at 127530, got ${slider127299?.endTime}`);
+    }
+
+    // Verify imported triggers from Ariabl'eyeS are aligned to grid
+    const ariaImported = importHitsoundsFromBeatmap(ariaParsed);
+    let offGridCount = 0;
+    for (const tr of ariaImported.triggers) {
+      const activeRed = redLines.findLast ? redLines.findLast((r) => r.time <= tr.time) || redLines[0] : redLines[0];
+      const snap16 = activeRed.beatLength / 16;
+      const diff = tr.time - activeRed.time;
+      const err16 = Math.abs(diff - Math.round(diff / snap16) * snap16);
+      const snap12 = activeRed.beatLength / 12;
+      const err12 = Math.abs(diff - Math.round(diff / snap12) * snap12);
+      if (err16 > 2 && err12 > 2) offGridCount++;
+    }
+    if (offGridCount > 0) {
+      throw new Error(`Expected 0 off-grid triggers in Ariabl'eyeS, got ${offGridCount}`);
+    }
+
+    console.log(`[PASS] Exact slider duration & edge times: slider at 127299ms ends at exactly 127530ms, 0 off-grid triggers!`);
+
     console.log(
       `[PASS] Multiple BPMs (42 red lines, 84-260 BPM) & Kiai intervals (${kiaiIntervals.length} zones) verified!`
     );
   }
 }
 
-console.log('\n>>> ALL 8 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+console.log('\n>>> ALL 9 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');

@@ -462,19 +462,18 @@ export class AudioEngine {
     }
 
     const targetTime = currentMs - 15;
-    let startIdx = 0;
+    let startIdx = triggers.length;
     let low = 0;
     let high = triggers.length - 1;
     while (low <= high) {
       const mid = (low + high) >> 1;
-      if (triggers[mid].time < targetTime) {
-        low = mid + 1;
-      } else {
+      if (triggers[mid].time >= targetTime) {
         startIdx = mid;
         high = mid - 1;
+      } else {
+        low = mid + 1;
       }
     }
-    if (low > high && low < triggers.length) startIdx = low;
 
     for (let i = startIdx; i < triggers.length; i++) {
       const tr = triggers[i];
