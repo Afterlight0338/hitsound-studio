@@ -27,8 +27,27 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     '#ff4081', '#00e5ff', '#ffc400', '#76ff03', '#e040fb',
     '#ff6e40', '#40c4ff', '#b2ff59', '#ffd740', '#69f0ae',
     '#ff5252', '#7c4dff', '#18ffff', '#b388ff', '#ffab40',
+    '#00b0ff', '#f50057', '#00e676', '#ff9100', '#651fff',
   ];
   let colorIdx = 0;
+
+  // Map general sample set fallback
+  const mapGeneralSet = beatmap.general.SampleSet?.toLowerCase() || 'soft';
+  const defaultSampleSet: SampleSetType =
+    mapGeneralSet === 'drum' ? 'Drum' : mapGeneralSet === 'normal' ? 'Normal' : 'Soft';
+
+  // Helper to find the active timing point (both red and green lines affect sampleSet/index/vol)
+  function getActiveTimingPoint(timeMs: number) {
+    let active = beatmap.timingPoints[0] || null;
+    for (const tp of beatmap.timingPoints) {
+      if (tp.time <= timeMs) {
+        active = tp;
+      } else {
+        break;
+      }
+    }
+    return active;
+  }
 
   function getOrCreateLane(
     sampleSet: SampleSetType,
@@ -39,7 +58,7 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     const key = `${sampleSet}_${addition}_idx${customIndex}`;
     if (!laneMap.has(key)) {
       const additionName = addition === 'None' ? 'HitNormal' : addition;
-      const idxLabel = customIndex > 0 ? ` #${customIndex}` : '';
+      const idxLabel = customIndex > 1 ? ` #${customIndex}` : customIndex === 1 ? ' #1' : '';
       const name = `${sampleSet} ${additionName}${idxLabel}`;
 
       const lane: Lane = {
@@ -60,72 +79,64 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
     return laneMap.get(key)!;
   }
 
-  // Helper to determine timing point volume at time t
-  function getVolumeAtTime(timeMs: number): number {
-    let vol = 100;
-    for (const tp of beatmap.timingPoints) {
-      if (tp.time <= timeMs) {
-        if (tp.volume > 0) vol = tp.volume;
-      } else {
-        break;
-      }
-    }
-    return vol;
-  }
-
   function processHitsoundAtTime(
     time: number,
     hitSound: number,
     normalSetNum: number,
     additionSetNum: number,
-    customIndex: number,
-    volOverride: number
+    customIndexOverride: number,
+    volumeOverride: number
   ) {
-    const vol = volOverride > 0 ? volOverride : getVolumeAtTime(time);
-    const normalSet = numberToSampleSet(normalSetNum || 2);
-    const additionSet = numberToSampleSet(additionSetNum || normalSetNum || 2);
+    const activeTp = getActiveTimingPoint(time);
 
+    // 1. Resolve Timing Point inheritance
+    const tpSet = activeTp?.sampleSet ? numberToSampleSet(activeTp.sampleSet) : defaultSampleSet;
+    const normalSet = normalSetNum > 0 ? numberToSampleSet(normalSetNum) : tpSet;
+    const additionSet = additionSetNum > 0 ? numberToSampleSet(additionSetNum) : normalSet;
+    const customIndex = customIndexOverride > 0 ? customIndexOverride : (activeTp?.sampleIndex || 0);
+    const volume = volumeOverride > 0 ? volumeOverride : (activeTp?.volume || 100);
+
+    // 2. IN OSU!: Every note ALWAYS triggers HitNormal (the base tap/kick layer)
+    const normalLane = getOrCreateLane(normalSet, 'None', customIndex, volume);
+    triggers.push({
+      id: `tr-${time}-${normalLane.id}-${triggers.length}`,
+      laneId: normalLane.id,
+      time,
+      volume,
+    });
+
+    // 3. Trigger Additions if present
     const hasWhistle = (hitSound & 2) !== 0;
     const hasFinish = (hitSound & 4) !== 0;
     const hasClap = (hitSound & 8) !== 0;
 
-    // Normal hit
-    if (!hasWhistle && !hasFinish && !hasClap) {
-      const lane = getOrCreateLane(normalSet, 'None', customIndex, vol);
+    if (hasClap) {
+      const clapLane = getOrCreateLane(additionSet, 'Clap', customIndex, volume);
       triggers.push({
-        id: `tr-${time}-${lane.id}-${triggers.length}`,
-        laneId: lane.id,
+        id: `tr-${time}-${clapLane.id}-${triggers.length}`,
+        laneId: clapLane.id,
         time,
-        volume: vol,
+        volume,
       });
     }
 
-    // Additions
-    if (hasClap) {
-      const lane = getOrCreateLane(additionSet, 'Clap', customIndex, vol);
-      triggers.push({
-        id: `tr-${time}-${lane.id}-${triggers.length}`,
-        laneId: lane.id,
-        time,
-        volume: vol,
-      });
-    }
     if (hasWhistle) {
-      const lane = getOrCreateLane(additionSet, 'Whistle', customIndex, vol);
+      const whistleLane = getOrCreateLane(additionSet, 'Whistle', customIndex, volume);
       triggers.push({
-        id: `tr-${time}-${lane.id}-${triggers.length}`,
-        laneId: lane.id,
+        id: `tr-${time}-${whistleLane.id}-${triggers.length}`,
+        laneId: whistleLane.id,
         time,
-        volume: vol,
+        volume,
       });
     }
+
     if (hasFinish) {
-      const lane = getOrCreateLane(additionSet, 'Finish', customIndex, vol);
+      const finishLane = getOrCreateLane(additionSet, 'Finish', customIndex, volume);
       triggers.push({
-        id: `tr-${time}-${lane.id}-${triggers.length}`,
-        laneId: lane.id,
+        id: `tr-${time}-${finishLane.id}-${triggers.length}`,
+        laneId: finishLane.id,
         time,
-        volume: vol,
+        volume,
       });
     }
   }
@@ -142,12 +153,10 @@ export function importHitsoundsFromBeatmap(beatmap: OsuBeatmap): ImportHitsounds
       const vol = ho.hitSample?.volume || 0;
       processHitsoundAtTime(ho.time, ho.hitSound, nSet, aSet, idx, vol);
     } else if (isSlider) {
-      // Check slider edges
       const edgeSounds = ho.edgeSounds || [ho.hitSound];
       const edgeSets = ho.edgeSets || [];
       const slides = ho.slides || 1;
 
-      // Approximate edge times
       const duration = (ho.endTime || ho.time + 300) - ho.time;
       const slideDur = duration / Math.max(1, slides);
 

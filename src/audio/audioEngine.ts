@@ -161,15 +161,23 @@ export class AudioEngine {
     // Check custom sample map (e.g. "soft-hitclap.wav", "soft-hitclap2.ogg")
     const searchKeys: string[] = [];
     if (lane.addition === 'None') {
-      searchKeys.push(`${setStr}-hitnormal${idxStr}.wav`);
-      searchKeys.push(`${setStr}-hitnormal${idxStr}.ogg`);
+      if (idxStr) {
+        searchKeys.push(`${setStr}-hitnormal${idxStr}.wav`);
+        searchKeys.push(`${setStr}-hitnormal${idxStr}.ogg`);
+        searchKeys.push(`${setStr}-hitnormal${idxStr}.mp3`);
+      }
       searchKeys.push(`${setStr}-hitnormal.wav`);
       searchKeys.push(`${setStr}-hitnormal.ogg`);
+      searchKeys.push(`${setStr}-hitnormal.mp3`);
     } else {
-      searchKeys.push(`${setStr}-hit${addStr}${idxStr}.wav`);
-      searchKeys.push(`${setStr}-hit${addStr}${idxStr}.ogg`);
+      if (idxStr) {
+        searchKeys.push(`${setStr}-hit${addStr}${idxStr}.wav`);
+        searchKeys.push(`${setStr}-hit${addStr}${idxStr}.ogg`);
+        searchKeys.push(`${setStr}-hit${addStr}${idxStr}.mp3`);
+      }
       searchKeys.push(`${setStr}-hit${addStr}.wav`);
       searchKeys.push(`${setStr}-hit${addStr}.ogg`);
+      searchKeys.push(`${setStr}-hit${addStr}.mp3`);
     }
 
     for (const key of searchKeys) {
