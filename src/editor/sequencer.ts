@@ -482,13 +482,13 @@ export class Sequencer {
           if (isMajor && (x > lastDrawnX + 50)) {
             // Measure text label
             this.ctx.fillStyle = '#8ab4f8';
-            this.ctx.font = 'bold 12px monospace';
+            this.ctx.font = 'bold 12px "Torus", sans-serif';
             this.ctx.fillText(`${measureNum}`, x + 5, 20);
 
             // Millisecond label
             const sec = (mTime / 1000).toFixed(2);
             this.ctx.fillStyle = '#7a869a';
-            this.ctx.font = '10px monospace';
+            this.ctx.font = '10px "Torus", sans-serif';
             this.ctx.fillText(`${sec}s`, x + 5, 34);
 
             lastDrawnX = x;
@@ -515,7 +515,7 @@ export class Sequencer {
 
         // Red BPM badge tag
         const tagText = `${bpm} BPM`;
-        this.ctx.font = 'bold 9px monospace';
+        this.ctx.font = 'bold 9px "Torus", sans-serif';
         const textW = this.ctx.measureText(tagText).width;
 
         this.ctx.fillStyle = 'rgba(239, 68, 68, 0.92)';

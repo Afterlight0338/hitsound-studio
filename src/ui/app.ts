@@ -5,6 +5,12 @@ import { copyHitsounds } from '../osu/copier';
 import { generateHitsoundBeatmap } from '../osu/hitsoundGenerator';
 import { importHitsoundsFromBeatmap } from '../osu/hitsoundImporter';
 import { parseOsu } from '../osu/parser';
+import {
+  clearSessionCache,
+  loadSessionFromCache,
+  saveSessionToCache,
+  type CachedSessionRecord,
+} from '../storage/sessionCache';
 import type {
   AdditionType,
   CopierOptions,
@@ -26,6 +32,9 @@ export class App {
   private referenceBeatmap: OsuBeatmap | null = null;
   private customSamples: Map<string, AudioBuffer> = new Map();
   private rawZipFiles: Map<string, Uint8Array> = new Map();
+  private rawSongAudioData: ArrayBuffer | null = null;
+  private laneDroppedSamples: Map<string, Uint8Array> = new Map();
+  private autoSaveTimeout: number | null = null;
 
   public activeTab: 'studio' | 'copier' = 'studio';
   private title = 'New Project';
@@ -55,6 +64,7 @@ export class App {
     this.setupGlobalShortcuts();
     this.setupAudioListeners();
     this.audioEngine.preloadDefaultSamples().catch(() => {});
+    this.checkRecentSessionOnStartup();
   }
 
   private initDefaultLanes() {
@@ -476,6 +486,7 @@ export class App {
       this.audioEngine.getWaveform()
     );
     this.audioEngine.updateSchedulerData(this.lanes, this.triggers);
+    this.scheduleAutoSave();
   }
 
   private setupAudioListeners() {
@@ -1019,6 +1030,269 @@ export class App {
     this.updateSequencerData();
   }
 
+  // --- Session Caching & Persistence ---
+
+  private async checkRecentSessionOnStartup() {
+    try {
+      const cached = await loadSessionFromCache();
+      if (!cached || !cached.project) return;
+
+      const p = cached.project;
+      const hasNotes = p.triggers && p.triggers.length > 0;
+      const hasBeatmaps = p.allBeatmaps && p.allBeatmaps.length > 0;
+      const hasAudio = Boolean(cached.songAudioBytes);
+      const isCustomized = p.title !== 'New Project' || (p.lanes && p.lanes.length !== 3);
+
+      if (!hasNotes && !hasBeatmaps && !hasAudio && !isCustomized) {
+        return;
+      }
+
+      this.showResumeSessionModal(cached);
+    } catch (err) {
+      console.warn('[Cache] Error checking startup session:', err);
+    }
+  }
+
+  private formatRelativeTime(timestamp: number): string {
+    const diffMs = Date.now() - timestamp;
+    const diffSec = Math.floor(diffMs / 1000);
+    if (diffSec < 60) return 'Just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHour = Math.floor(diffMin / 60);
+    if (diffHour < 24) return `${diffHour}h ago`;
+    const d = new Date(timestamp);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  private showResumeSessionModal(cached: CachedSessionRecord) {
+    document.getElementById('session-resume-modal')?.remove();
+
+    const p = cached.project;
+    const projectTitle = p.artist && p.title ? `${p.artist} - ${p.title}` : (p.title || 'Untitled Project');
+    const noteCount = p.triggers ? p.triggers.length : 0;
+    const laneCount = p.lanes ? p.lanes.length : 0;
+    const diffCount = p.allBeatmaps ? p.allBeatmaps.length : 0;
+    const timeStr = this.formatRelativeTime(cached.savedAt);
+
+    const backdrop = document.createElement('div');
+    backdrop.id = 'session-resume-modal';
+    backdrop.className = 'modal-backdrop';
+
+    backdrop.innerHTML = `
+      <div class="session-modal" role="dialog" aria-modal="true">
+        <div class="session-modal-header">
+          <span class="session-modal-tag">💾 Previous Session Found</span>
+          <button class="btn-close-modal" id="btn-modal-close" title="Dismiss">✕</button>
+        </div>
+        <div class="session-modal-body">
+          <h2 class="session-modal-title">Continue from previous session?</h2>
+          <p class="session-modal-desc">
+            We found your project from your previous studio session in your browser cache.
+          </p>
+
+          <div class="session-details-card">
+            <div class="session-details-title" title="${projectTitle}">${projectTitle}</div>
+            <div class="session-details-grid">
+              <div class="session-details-item">
+                <span>🔔</span>
+                <span><strong>${noteCount}</strong> notes placed</span>
+              </div>
+              <div class="session-details-item">
+                <span>🎚</span>
+                <span><strong>${laneCount}</strong> lanes configured</span>
+              </div>
+              <div class="session-details-item">
+                <span>📑</span>
+                <span><strong>${diffCount}</strong> difficulties</span>
+              </div>
+              <div class="session-details-item">
+                <span>🕒</span>
+                <span>Saved <strong>${timeStr}</strong></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="session-modal-actions">
+          <button id="btn-modal-fresh" class="btn btn-secondary">Start Fresh</button>
+          <button id="btn-modal-resume" class="btn btn-primary btn-lg">⚡ Resume Session</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+
+    const closeModal = () => {
+      backdrop.remove();
+    };
+
+    const handleResume = async () => {
+      closeModal();
+      await this.resumeSession(cached);
+    };
+
+    const handleFresh = async () => {
+      closeModal();
+      await clearSessionCache();
+      this.showToast('✨ Started fresh project');
+    };
+
+    document.getElementById('btn-modal-resume')?.addEventListener('click', handleResume);
+    document.getElementById('btn-modal-fresh')?.addEventListener('click', handleFresh);
+    document.getElementById('btn-modal-close')?.addEventListener('click', closeModal);
+
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        window.removeEventListener('keydown', keyHandler);
+        handleResume();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        window.removeEventListener('keydown', keyHandler);
+        closeModal();
+      }
+    };
+    window.addEventListener('keydown', keyHandler);
+  }
+
+  public async resumeSession(cached: CachedSessionRecord) {
+    try {
+      this.showToast('⏳ Resuming session...');
+      const p = cached.project;
+
+      this.title = p.title || this.title;
+      this.artist = p.artist || this.artist;
+      this.creator = p.creator || this.creator;
+      this.audioFileName = p.audioFileName || this.audioFileName;
+
+      this.lanes = p.lanes || this.lanes;
+      this.triggers = p.triggers || [];
+      this.timingPoints = p.timingPoints || this.timingPoints;
+      this.allBeatmaps = p.allBeatmaps || [];
+      this.undoStack = [];
+      this.redoStack = [];
+
+      // Restore raw zip files
+      if (cached.zipEntries && cached.zipEntries.length > 0) {
+        this.rawZipFiles = new Map(cached.zipEntries);
+        this.audioEngine.setRawSampleFiles(this.rawZipFiles);
+      }
+
+      // Restore song audio
+      if (cached.songAudioBytes) {
+        this.rawSongAudioData = cached.songAudioBytes;
+        await this.audioEngine.decodeSongAudio(cached.songAudioBytes);
+      }
+
+      // Restore custom samples dropped on lanes
+      if (cached.laneSampleBytes) {
+        for (const [laneId, bytes] of Object.entries(cached.laneSampleBytes)) {
+          this.laneDroppedSamples.set(laneId, bytes);
+          const lane = this.lanes.find((l) => l.id === laneId);
+          if (lane) {
+            try {
+              const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+              lane.audioBuffer = await this.audioEngine.decodeSampleAudio(arrayBuf);
+            } catch (e) {
+              console.warn(`Could not decode custom sample for lane ${laneId}:`, e);
+            }
+          }
+        }
+      }
+
+      // Restore reference beatmap
+      if (p.referenceVersion) {
+        this.referenceBeatmap = this.allBeatmaps.find((bm) => (bm.metadata.Version || '') === p.referenceVersion) || null;
+      } else if (this.allBeatmaps.length > 0) {
+        this.referenceBeatmap = this.allBeatmaps[0];
+      }
+
+      // Update UI components
+      this.updateBeatmapSelectors();
+      this.renderLanesList();
+      this.updateSequencerData();
+      this.updateCopierTargetsList();
+
+      this.showToast(`✔ Resumed: ${this.artist} - ${this.title}`);
+    } catch (err) {
+      console.error('Failed to resume session:', err);
+      this.showToast('❌ Error restoring previous session');
+    }
+  }
+
+  public scheduleAutoSave() {
+    if (this.autoSaveTimeout !== null) {
+      window.clearTimeout(this.autoSaveTimeout);
+    }
+
+    this.autoSaveTimeout = window.setTimeout(async () => {
+      this.autoSaveTimeout = null;
+      await this.saveCurrentSession();
+    }, 1500);
+  }
+
+  public async saveCurrentSession() {
+    const hasNotes = this.triggers.length > 0;
+    const hasBeatmaps = this.allBeatmaps.length > 0;
+    const hasAudio = Boolean(this.rawSongAudioData);
+    const isCustomized = this.title !== 'New Project' || this.lanes.length !== 3;
+
+    if (!hasNotes && !hasBeatmaps && !hasAudio && !isCustomized) {
+      return;
+    }
+
+    const serializableLanes = this.lanes.map((l) => ({
+      id: l.id,
+      name: l.name,
+      sampleSet: l.sampleSet,
+      addition: l.addition,
+      additionSet: l.additionSet,
+      customIndex: l.customIndex,
+      volume: l.volume,
+      color: l.color,
+      muted: l.muted,
+      solo: l.solo,
+      customSampleName: l.customSampleName,
+    }));
+
+    const zipEntries: [string, Uint8Array][] = [];
+    for (const [name, bytes] of this.rawZipFiles.entries()) {
+      const lower = name.toLowerCase();
+      if (lower.endsWith('.mp4') || lower.endsWith('.avi') || lower.endsWith('.flv') || lower.endsWith('.mkv')) {
+        continue;
+      }
+      if (bytes.length > 25 * 1024 * 1024) continue;
+      zipEntries.push([name, bytes]);
+    }
+
+    const laneSampleObj: Record<string, Uint8Array> = {};
+    for (const [laneId, bytes] of this.laneDroppedSamples.entries()) {
+      laneSampleObj[laneId] = bytes;
+    }
+
+    const record: CachedSessionRecord = {
+      id: 'current',
+      savedAt: Date.now(),
+      project: {
+        title: this.title,
+        artist: this.artist,
+        creator: this.creator,
+        audioFileName: this.audioFileName,
+        lanes: serializableLanes as Lane[],
+        triggers: this.triggers,
+        timingPoints: this.timingPoints,
+        allBeatmaps: this.allBeatmaps,
+        referenceVersion: this.referenceBeatmap?.metadata?.Version || null,
+        savedAt: Date.now(),
+      },
+      songAudioBytes: this.rawSongAudioData || undefined,
+      laneSampleBytes: Object.keys(laneSampleObj).length > 0 ? laneSampleObj : undefined,
+      zipEntries: zipEntries.length > 0 ? zipEntries : undefined,
+    };
+
+    await saveSessionToCache(record);
+  }
+
   public showToast(message: string) {
     let container = document.getElementById('toast-container');
     if (!container) {
@@ -1182,6 +1456,7 @@ export class App {
     }
     this.lanes = this.lanes.filter((l) => l.id !== laneId);
     this.triggers = this.triggers.filter((t) => t.laneId !== laneId);
+    this.laneDroppedSamples.delete(laneId);
     this.renderLanesList();
     this.updateSequencerData();
   }
@@ -1283,6 +1558,7 @@ export class App {
           const buffer = await this.audioEngine.decodeSampleAudio(arrayBuffer);
           lane.audioBuffer = buffer;
           lane.customSampleName = file.name;
+          this.laneDroppedSamples.set(lane.id, new Uint8Array(arrayBuffer.slice(0)));
           if (lane.name.startsWith('Lane ') || lane.name.startsWith('Soft ') || lane.name.startsWith('Normal ') || lane.name.startsWith('Drum ')) {
             lane.name = file.name.replace(/\.[^/.]+$/, '');
           }
@@ -1439,7 +1715,13 @@ export class App {
     this.triggers = [];
     this.undoStack = [];
     this.redoStack = [];
-    this.clipboard = [];
+    this.rawSongAudioData = null;
+    this.laneDroppedSamples.clear();
+    if (this.autoSaveTimeout !== null) {
+      window.clearTimeout(this.autoSaveTimeout);
+      this.autoSaveTimeout = null;
+    }
+    clearSessionCache().catch(() => {});
 
     // Clear file inputs so re-importing the same file works
     const fileInput = document.getElementById('file-input') as HTMLInputElement;
@@ -1525,6 +1807,7 @@ export class App {
       for (const [filename, bytes] of this.rawZipFiles.entries()) {
         if (filename.toLowerCase() === audioName.toLowerCase()) {
           const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          this.rawSongAudioData = arrayBuf.slice(0);
           await this.audioEngine.decodeSongAudio(arrayBuf);
           this.audioFileName = filename;
           foundSong = true;
@@ -1538,6 +1821,7 @@ export class App {
           const lower = filename.toLowerCase();
           if ((lower.endsWith('.mp3') || lower.endsWith('.ogg')) && !lower.includes('hit')) {
             const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+            this.rawSongAudioData = arrayBuf.slice(0);
             await this.audioEngine.decodeSongAudio(arrayBuf);
             this.audioFileName = filename;
             foundSong = true;
@@ -1631,6 +1915,7 @@ export class App {
 
   private async loadSongAudio(file: File) {
     const arrayBuffer = await file.arrayBuffer();
+    this.rawSongAudioData = arrayBuffer.slice(0);
     await this.audioEngine.decodeSongAudio(arrayBuffer);
     this.audioFileName = file.name;
     this.updateSequencerData();

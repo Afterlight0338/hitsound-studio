@@ -9,7 +9,52 @@ console.log('=== RUNNING HITSOUND STUDIO CORE TEST SUITE ===');
 
 // Test 1: Real Beatmap Parsing
 const sampleFile = '/home/afterlight/Downloads/MiLO - BEST PLOT (Game Ver.) (RyoYamada) [Expert].osu';
-const sampleText = fs.readFileSync(sampleFile, 'utf-8');
+const sampleText = fs.existsSync(sampleFile)
+  ? fs.readFileSync(sampleFile, 'utf-8')
+  : `osu file format v14
+
+[General]
+AudioFilename: audio.mp3
+AudioLeadIn: 0
+PreviewTime: -1
+Countdown: 0
+SampleSet: Soft
+StackLeniency: 0.7
+Mode: 0
+LetterboxInBreaks: 0
+WidescreenStoryboard: 0
+
+[Metadata]
+Title: BEST PLOT
+TitleUnicode: BEST PLOT
+Artist: MiLO
+ArtistUnicode: MiLO
+Creator: RyoYamada
+Version: Expert
+Source: 
+Tags: 
+BeatmapID: 0
+BeatmapSetID: -1
+
+[Difficulty]
+HPDrainRate: 5
+CircleSize: 4
+OverallDifficulty: 8
+ApproachRate: 9
+SliderMultiplier: 1.4
+SliderTickRate: 1
+
+[Events]
+
+[TimingPoints]
+1000,500,4,2,1,60,1,0
+9000,-100,4,2,1,80,0,0
+
+[HitObjects]
+256,192,9325,1,0,0:0:0:0:
+256,192,9611,1,0,0:0:0:0:
+256,192,10000,1,0,0:0:0:0:
+`;
 const beatmap = parseOsu(sampleText, 'Expert.osu');
 
 console.log(`[PASS] Parsed beatmap: ${beatmap.metadata.Artist} - ${beatmap.metadata.Title} [${beatmap.metadata.Version}]`);
