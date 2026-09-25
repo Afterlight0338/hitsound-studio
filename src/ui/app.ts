@@ -1907,10 +1907,109 @@ export class App {
 
       this.updateBeatmapSelectors();
       this.updateSequencerData();
+
+      // 7. Check for non-standard hitsound sample filenames
+      this.checkNonStandardHitsounds(this.audioFileName || audioName);
     } catch (err) {
       console.error('Error importing .osz:', err);
       alert(`Failed to import .osz: ${err}`);
     }
+  }
+
+  private checkNonStandardHitsounds(songAudioFilename: string) {
+    const standardOsuSampleRegex = /^(normal|soft|drum)-(hit(normal|whistle|finish|clap)|slider(slide|tick|whistle))\d*\.(wav|ogg|mp3)$/i;
+    const standardMiscSampleRegex = /^(spinnerbonus|spinnerspin|combobreak|sectionpass|sectionfail|nightcore-(clap|finish|hat|kick)|pause-loop|applause)\d*\.(wav|ogg|mp3)$/i;
+
+    const nonStandard: string[] = [];
+    const songLower = (songAudioFilename || '').toLowerCase();
+
+    for (const [filename, bytes] of this.rawZipFiles.entries()) {
+      const lower = filename.toLowerCase();
+      // Skip non-audio
+      if (!/\.(wav|ogg|mp3)$/i.test(lower)) continue;
+      // Skip main song audio
+      if (lower === songLower || lower === 'audio.mp3') continue;
+      // Skip dummy 44-byte silent files
+      if (bytes.length <= 44) continue;
+
+      if (!standardOsuSampleRegex.test(lower) && !standardMiscSampleRegex.test(lower)) {
+        nonStandard.push(filename);
+      }
+    }
+
+    if (nonStandard.length > 0) {
+      this.showNonStandardNamingModal(nonStandard);
+    }
+  }
+
+  private showNonStandardNamingModal(files: string[]) {
+    document.getElementById('hitsound-naming-modal')?.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.id = 'hitsound-naming-modal';
+    backdrop.className = 'modal-backdrop';
+
+    const fileListHtml = files
+      .slice(0, 10)
+      .map((f) => `<div class="naming-advisory-file-item"><span>⚠️</span><span>${f}</span></div>`)
+      .join('');
+    const moreCount = files.length > 10 ? `<div class="naming-advisory-file-item" style="color:#8892b0">...and ${files.length - 10} more</div>` : '';
+
+    backdrop.innerHTML = `
+      <div class="session-modal" style="width: 540px;" role="dialog" aria-modal="true">
+        <div class="session-modal-header" style="background: #251c14;">
+          <span class="session-modal-tag" style="color: #ffb74d;">⚠️ Hitsound Naming Advisory</span>
+          <button class="btn-close-modal" id="btn-naming-modal-close" title="Dismiss">✕</button>
+        </div>
+        <div class="session-modal-body">
+          <h2 class="session-modal-title" style="font-size: 1.15rem;">Custom Hitsound File Names Detected</h2>
+          <p class="session-modal-desc">
+            This mapset contains <strong>${files.length}</strong> audio sample(s) that don't match osu!'s standard hitsound naming convention:
+          </p>
+
+          <div class="naming-advisory-file-list">
+            ${fileListHtml}
+            ${moreCount}
+          </div>
+
+          <div class="naming-advisory-guide-card">
+            <strong style="color: #fff; display: block; margin-bottom: 4px;">💡 Standard osu! Ranking Criteria Convention:</strong>
+            Standard osu! beatmaps organize hitsounds into sample sets, additions, and custom indices:
+            <ul style="margin: 6px 0 0 16px; padding: 0;">
+              <li><strong>Hit sounds:</strong> <code>{sampleSet}-hit{addition}[index].wav</code><br>
+                <em>(e.g., <code>soft-hitclap.wav</code>, <code>soft-hitclap2.wav</code>, <code>drum-hitwhistle.wav</code>)</em>
+              </li>
+              <li><strong>Slider sounds:</strong> <code>{sampleSet}-sliderslide[index].wav</code>, <code>{sampleSet}-slidertick.wav</code></li>
+              <li><strong>Sample sets:</strong> <code>soft</code>, <code>normal</code>, <code>drum</code></li>
+              <li><strong>Additions:</strong> <code>normal</code>, <code>whistle</code>, <code>finish</code>, <code>clap</code></li>
+            </ul>
+          </div>
+
+          <p style="font-size: 0.78rem; color: #8892b0; margin-top: 8px;">
+            ℹ️ <strong>Hitsound Studio will continue to work normally</strong> and preserve your custom samples. However, if you plan to submit or rank your map, osu! ranking criteria recommends renaming them.
+          </p>
+        </div>
+        <div class="session-modal-actions">
+          <button id="btn-naming-modal-ok" class="btn btn-primary" style="min-width: 120px;">Got It</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+
+    const close = () => backdrop.remove();
+    document.getElementById('btn-naming-modal-close')?.addEventListener('click', close);
+    document.getElementById('btn-naming-modal-ok')?.addEventListener('click', close);
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) close();
+    });
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        close();
+        window.removeEventListener('keydown', keyHandler);
+      }
+    };
+    window.addEventListener('keydown', keyHandler);
   }
 
   private async loadSongAudio(file: File) {

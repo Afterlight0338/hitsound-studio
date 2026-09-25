@@ -1060,3 +1060,46 @@ body, html {
   border-top: 1px solid var(--border-color);
 }
 
+/* Hitsound Naming Advisory Modal */
+.naming-advisory-file-list {
+  max-height: 120px;
+  overflow-y: auto;
+  background: #0f121a;
+  border: 1px solid #2d3345;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.naming-advisory-file-item {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #ffb74d;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.naming-advisory-guide-card {
+  background: rgba(33, 150, 243, 0.08);
+  border: 1px solid rgba(33, 150, 243, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: #cfd8dc;
+}
+
+.naming-advisory-guide-card code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+  color: #4fc3f7;
+}
+
+
