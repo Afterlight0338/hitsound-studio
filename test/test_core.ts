@@ -335,4 +335,69 @@ if (fs.existsSync(fallenPath)) {
   }
 }
 
-console.log('\n>>> ALL 9 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+// Test 10: Multi-SampleSet Additions Separation (Soft HitNormal + Drum Clap)
+{
+  const lanes10: Lane[] = [
+    { id: 'hn', name: 'Soft HitNormal', sampleSet: 'Soft', addition: 'None', additionSet: 'Auto', customIndex: 0, volume: 80, color: '#fff', muted: false, solo: false },
+    { id: 'cl', name: 'Drum Clap', sampleSet: 'Drum', addition: 'Clap', additionSet: 'Auto', customIndex: 0, volume: 85, color: '#ff4081', muted: false, solo: false },
+  ];
+  const triggers10: Trigger[] = [
+    { id: 'tr1', laneId: 'hn', time: 5000 },
+    { id: 'tr2', laneId: 'cl', time: 5000 },
+  ];
+  const gen10 = generateHitsoundBeatmap(lanes10, triggers10, beatmap, 'Hitsounds');
+  const ho10 = gen10.beatmap.hitObjects.find((h) => h.time === 5000);
+  if (!ho10) throw new Error('Test 10: Note at 5000ms not found!');
+  if (ho10.hitSound !== 8) throw new Error(`Test 10: Expected hitSound = 8 (Clap), got ${ho10.hitSound}`);
+  if (ho10.hitSample.normalSet !== 2) throw new Error(`Test 10: Expected normalSet = 2 (Soft), got ${ho10.hitSample.normalSet}`);
+  if (ho10.hitSample.additionSet !== 3) throw new Error(`Test 10: Expected additionSet = 3 (Drum), got ${ho10.hitSample.additionSet}`);
+  console.log('[PASS] Test 10: Multi-sampleSet addition verified! Soft HitNormal + Drum Clap -> normalSet: 2 (Soft), additionSet: 3 (Drum)');
+}
+
+// Test 11: Multi-Layer Additions with Different AdditionSets
+{
+  const lanes11: Lane[] = [
+    { id: 'w1', name: 'Soft Whistle', sampleSet: 'Soft', addition: 'Whistle', additionSet: 'Auto', customIndex: 1, volume: 80, color: '#00e5ff', muted: false, solo: false },
+    { id: 'c1', name: 'Drum Clap', sampleSet: 'Drum', addition: 'Clap', additionSet: 'Auto', customIndex: 0, volume: 85, color: '#ff4081', muted: false, solo: false },
+  ];
+  const triggers11: Trigger[] = [
+    { id: 'tr11_1', laneId: 'w1', time: 6000 },
+    { id: 'tr11_2', laneId: 'c1', time: 6000 },
+  ];
+  const gen11 = generateHitsoundBeatmap(lanes11, triggers11, beatmap, 'Hitsounds');
+  const hos11 = gen11.beatmap.hitObjects.filter((h) => h.time === 6000);
+  if (hos11.length !== 2) throw new Error(`Test 11: Expected 2 layered notes at 6000ms, got ${hos11.length}`);
+  const whistleNote = hos11.find((h) => h.hitSound === 2);
+  const clapNote = hos11.find((h) => h.hitSound === 8);
+  if (!whistleNote || whistleNote.hitSample.additionSet !== 2) throw new Error('Test 11: Soft Whistle layer missing or wrong additionSet!');
+  if (!clapNote || clapNote.hitSample.additionSet !== 3) throw new Error('Test 11: Drum Clap layer missing or wrong additionSet!');
+  console.log('[PASS] Test 11: Multi-layer additions verified! Soft Whistle and Drum Clap cleanly layered at same timestamp.');
+}
+
+// Test 12: Custom Sample Filename Preservation
+{
+  const lanes12: Lane[] = [
+    { id: 'k1', name: 'Kicks 1', sampleSet: 'Soft', addition: 'None', additionSet: 'Auto', customIndex: 0, volume: 90, color: '#ffc400', muted: false, solo: false, customSampleName: 'Kicks 1' },
+    { id: 's1', name: 'snares 3', sampleSet: 'Drum', addition: 'Clap', additionSet: 'Auto', customIndex: 0, volume: 85, color: '#ff4081', muted: false, solo: false, customSampleName: 'snares 3' },
+  ];
+  const triggers12: Trigger[] = [
+    { id: 'tr12_1', laneId: 'k1', time: 7000 },
+    { id: 'tr12_2', laneId: 's1', time: 7000 },
+  ];
+  const gen12 = generateHitsoundBeatmap(lanes12, triggers12, beatmap, 'Hitsounds');
+  const hos12 = gen12.beatmap.hitObjects.filter((h) => h.time === 7000);
+  const kickHo = hos12.find((h) => h.hitSample.filename === 'Kicks 1');
+  const snareHo = hos12.find((h) => h.hitSample.filename === 'snares 3');
+  if (!kickHo || !snareHo) throw new Error('Test 12: Custom sample filenames missing from generated notes!');
+  console.log('[PASS] Test 12: Custom sample filenames preserved in generated hitsound diff: Kicks 1, snares 3');
+
+  // Test Copier combining multi-source objects
+  const target12 = JSON.parse(JSON.stringify(beatmap)) as OsuBeatmap;
+  target12.hitObjects = [{ x: 100, y: 100, time: 7000, type: 1, hitSound: 0, rawString: '' }];
+  const copyRes12 = copyHitsounds(gen12.beatmap, [target12], copierOptions)[0];
+  const copiedHo = copyRes12.beatmap.hitObjects[0];
+  if (copiedHo.hitSound !== 8) throw new Error(`Test 12: Expected copied hitSound = 8 (Clap), got ${copiedHo.hitSound}`);
+  console.log('[PASS] Test 12: Copier successfully combined multiple layered source objects into target hitobject!');
+}
+
+console.log('\n>>> ALL 12 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');

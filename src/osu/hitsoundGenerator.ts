@@ -70,77 +70,157 @@ export function generateHitsoundBeatmap(
   for (const t of timestamps) {
     const trList = timeMap.get(t)!;
 
-    let combinedHitSound = 0;
-    let normalSet = 0;
-    let additionSet = 0;
-    let customIndex = 0;
-    let maxVolume = 0;
+    let normalTrigger: { lane: Lane; vol: number } | null = null;
+    const additionTriggers: { lane: Lane; vol: number; bit: number; addSet: number; customIndex: number }[] = [];
+    const customSampleTriggers: { lane: Lane; vol: number; filename: string }[] = [];
 
     for (const tr of trList) {
       const lane = laneMap.get(tr.laneId)!;
-      const bit = additionToBitmask(lane.addition);
-      combinedHitSound |= bit;
-
-      const laneNormalSet = sampleSetToNumber(lane.sampleSet);
-      if (laneNormalSet > 0) {
-        normalSet = laneNormalSet;
-      }
-
-      if (lane.additionSet !== 'Auto') {
-        const laneAddSet = sampleSetToNumber(lane.additionSet);
-        if (laneAddSet > 0) {
-          additionSet = laneAddSet;
-        }
-      }
-
-      if (lane.customIndex > 0) {
-        customIndex = lane.customIndex;
-      }
-
       const vol = tr.volume !== undefined ? tr.volume : lane.volume;
-      if (vol > maxVolume) {
-        maxVolume = vol;
+
+      const customFile = lane.customSampleName?.trim();
+      if (customFile) {
+        customSampleTriggers.push({ lane, vol, filename: customFile });
+        continue;
+      }
+
+      if (lane.addition === 'None') {
+        if (!normalTrigger || vol > normalTrigger.vol) {
+          normalTrigger = { lane, vol };
+        }
+      } else {
+        const bit = additionToBitmask(lane.addition);
+        const addSet = lane.additionSet !== 'Auto'
+          ? sampleSetToNumber(lane.additionSet)
+          : sampleSetToNumber(lane.sampleSet);
+        additionTriggers.push({
+          lane,
+          vol,
+          bit,
+          addSet: addSet > 0 ? addSet : 2,
+          customIndex: lane.customIndex || 0,
+        });
       }
     }
 
-    if (maxVolume === 0) maxVolume = 100;
-    if (normalSet === 0) normalSet = 2; // default to Soft
-    if (additionSet === 0) additionSet = normalSet;
+    const baseNormalSet = normalTrigger ? sampleSetToNumber(normalTrigger.lane.sampleSet) : 2;
+    const baseNormalIndex = normalTrigger?.lane.customIndex || 0;
+    const baseNormalVol = normalTrigger ? normalTrigger.vol : 100;
+
+    const timestampHitObjects: HitObject[] = [];
+
+    if (additionTriggers.length === 0 && customSampleTriggers.length === 0) {
+      // HitNormal only
+      timestampHitObjects.push({
+        x: 256,
+        y: 192,
+        time: t,
+        type: 1,
+        hitSound: 0,
+        hitSample: {
+          normalSet: baseNormalSet,
+          additionSet: baseNormalSet,
+          index: baseNormalIndex,
+          volume: baseNormalVol,
+          filename: '',
+        },
+        rawString: '',
+      });
+    } else {
+      // Group addition triggers by addSet
+      const addGroups = new Map<number, { bitmask: number; addSet: number; customIndex: number; maxVol: number }>();
+      for (const at of additionTriggers) {
+        if (!addGroups.has(at.addSet)) {
+          addGroups.set(at.addSet, { bitmask: 0, addSet: at.addSet, customIndex: at.customIndex, maxVol: at.vol });
+        }
+        const grp = addGroups.get(at.addSet)!;
+        grp.bitmask |= at.bit;
+        if (at.customIndex > 0 && at.customIndex > grp.customIndex) grp.customIndex = at.customIndex;
+        if (at.vol > grp.maxVol) grp.maxVol = at.vol;
+      }
+
+      let isFirst = true;
+      for (const grp of addGroups.values()) {
+        timestampHitObjects.push({
+          x: 256,
+          y: 192,
+          time: t,
+          type: 1,
+          hitSound: grp.bitmask,
+          hitSample: {
+            normalSet: isFirst && normalTrigger ? baseNormalSet : (isFirst ? grp.addSet : 0),
+            additionSet: grp.addSet,
+            index: grp.customIndex || (isFirst ? baseNormalIndex : 0),
+            volume: isFirst && normalTrigger ? Math.max(grp.maxVol, baseNormalVol) : grp.maxVol,
+            filename: '',
+          },
+          rawString: '',
+        });
+        isFirst = false;
+      }
+
+      // If there was a HitNormal lane, but no addition triggers (only custom sample triggers):
+      if (addGroups.size === 0 && normalTrigger) {
+        timestampHitObjects.push({
+          x: 256,
+          y: 192,
+          time: t,
+          type: 1,
+          hitSound: 0,
+          hitSample: {
+            normalSet: baseNormalSet,
+            additionSet: baseNormalSet,
+            index: baseNormalIndex,
+            volume: baseNormalVol,
+            filename: '',
+          },
+          rawString: '',
+        });
+      }
+
+      // Custom sample triggers
+      for (const ct of customSampleTriggers) {
+        timestampHitObjects.push({
+          x: 256,
+          y: 192,
+          time: t,
+          type: 1,
+          hitSound: additionToBitmask(ct.lane.addition),
+          hitSample: {
+            normalSet: 0,
+            additionSet: 0,
+            index: 0,
+            volume: ct.vol,
+            filename: ct.filename,
+          },
+          rawString: '',
+        });
+      }
+    }
 
     // Check if we need to emit a green line for volume / custom index
-    if (maxVolume !== lastActiveVolume || customIndex !== lastActiveIndex || normalSet !== lastActiveSampleSet) {
+    const primaryHo = timestampHitObjects[0];
+    const primarySampleSet = primaryHo?.hitSample?.normalSet || primaryHo?.hitSample?.additionSet || lastActiveSampleSet;
+    const primaryIndex = primaryHo?.hitSample?.index || 0;
+    const primaryVol = primaryHo?.hitSample?.volume || 100;
+
+    if (primaryVol !== lastActiveVolume || primaryIndex !== lastActiveIndex || primarySampleSet !== lastActiveSampleSet) {
       generatedGreenLines.push({
         time: t,
         beatLength: -100, // 1.0x SV
         meter: 4,
-        sampleSet: normalSet,
-        sampleIndex: customIndex,
-        volume: maxVolume,
+        sampleSet: primarySampleSet,
+        sampleIndex: primaryIndex,
+        volume: primaryVol,
         uninherited: false,
         effects: 0,
       });
-      lastActiveVolume = maxVolume;
-      lastActiveIndex = customIndex;
-      lastActiveSampleSet = normalSet;
+      lastActiveVolume = primaryVol;
+      lastActiveIndex = primaryIndex;
+      lastActiveSampleSet = primarySampleSet;
     }
 
-    const ho: HitObject = {
-      x: 256,
-      y: 192,
-      time: t,
-      type: 1, // Circle
-      hitSound: combinedHitSound,
-      hitSample: {
-        normalSet,
-        additionSet,
-        index: customIndex,
-        volume: maxVolume,
-        filename: '',
-      },
-      rawString: '',
-    };
-
-    hitObjects.push(ho);
+    hitObjects.push(...timestampHitObjects);
   }
 
   // Base red lines (BPM/offset)

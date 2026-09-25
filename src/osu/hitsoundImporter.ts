@@ -97,6 +97,29 @@ export function importHitsoundsFromBeatmap(
     return active;
   }
 
+  function getOrCreateCustomSampleLane(filename: string, volume: number): Lane {
+    const key = `custom_${filename.toLowerCase()}`;
+    if (!laneMap.has(key)) {
+      const cleanName = filename.replace(/\.[^/.]+$/, '');
+      const lane: Lane = {
+        id: `lane-imp-custom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: cleanName,
+        sampleSet: 'Soft',
+        addition: 'None',
+        additionSet: 'Auto',
+        customIndex: 0,
+        volume: volume > 0 ? volume : 85,
+        color: laneColors[colorIdx % laneColors.length],
+        muted: false,
+        solo: false,
+        customSampleName: filename,
+      };
+      colorIdx++;
+      laneMap.set(key, lane);
+    }
+    return laneMap.get(key)!;
+  }
+
   function getOrCreateLane(
     sampleSet: SampleSetType,
     addition: 'None' | 'Whistle' | 'Finish' | 'Clap',
@@ -127,13 +150,16 @@ export function importHitsoundsFromBeatmap(
     return laneMap.get(key)!;
   }
 
+  const isMania = beatmap.general.Mode === '3';
+
   function processHitsoundAtTime(
     time: number,
     hitSound: number,
     normalSetNum: number,
     additionSetNum: number,
     customIndexOverride: number,
-    volumeOverride: number
+    volumeOverride: number,
+    filenameOverride?: string
   ) {
     const activeTp = getActiveTimingPoint(time);
 
@@ -144,15 +170,35 @@ export function importHitsoundsFromBeatmap(
     const customIndex = customIndexOverride > 0 ? customIndexOverride : (activeTp?.sampleIndex || 0);
     const volume = volumeOverride > 0 ? volumeOverride : (activeTp?.volume || 100);
 
-    // 2. IN OSU!: Every note ALWAYS triggers HitNormal (the base tap/kick layer)
-    const effNormalIdx = resolveEffectiveIndex(normalSet, 'None', customIndex);
-    const normalLane = getOrCreateLane(normalSet, 'None', effNormalIdx, volume);
-    triggers.push({
-      id: `tr-${time}-${normalLane.id}-${triggers.length}`,
-      laneId: normalLane.id,
-      time,
-      volume,
-    });
+    const cleanFilename = filenameOverride?.trim();
+    if (cleanFilename) {
+      const customLane = getOrCreateCustomSampleLane(cleanFilename, volume);
+      triggers.push({
+        id: `tr-${time}-${customLane.id}-${triggers.length}`,
+        laneId: customLane.id,
+        time,
+        volume,
+      });
+      // In osu!, custom sample replaces normal hit sound when hitSound is 0
+      if (hitSound === 0) {
+        return;
+      }
+    }
+
+    // 2. Base HitNormal
+    // In osu! standard, notes always trigger HitNormal.
+    // In osu!mania, individual column notes with hitSound > 0 are additions only,
+    // and notes with hitSound === 0 without a custom filename are HitNormal taps.
+    if (!isMania || (!cleanFilename && hitSound === 0)) {
+      const effNormalIdx = resolveEffectiveIndex(normalSet, 'None', customIndex);
+      const normalLane = getOrCreateLane(normalSet, 'None', effNormalIdx, volume);
+      triggers.push({
+        id: `tr-${time}-${normalLane.id}-${triggers.length}`,
+        laneId: normalLane.id,
+        time,
+        volume,
+      });
+    }
 
     // 3. Trigger Additions if present
     const hasWhistle = (hitSound & 2) !== 0;
@@ -203,7 +249,8 @@ export function importHitsoundsFromBeatmap(
       const aSet = ho.hitSample?.additionSet || 0;
       const idx = ho.hitSample?.index || 0;
       const vol = ho.hitSample?.volume || 0;
-      processHitsoundAtTime(ho.time, ho.hitSound, nSet, aSet, idx, vol);
+      const fn = ho.hitSample?.filename || '';
+      processHitsoundAtTime(ho.time, ho.hitSound, nSet, aSet, idx, vol, fn);
     } else if (isSlider) {
       const edgeSounds = ho.edgeSounds || [ho.hitSound];
       const edgeSets = ho.edgeSets || [];
@@ -231,8 +278,9 @@ export function importHitsoundsFromBeatmap(
         }
         const idx = ho.hitSample?.index || 0;
         const vol = ho.hitSample?.volume || 0;
+        const fn = i === 0 ? (ho.hitSample?.filename || '') : '';
 
-        processHitsoundAtTime(edgeTime, edgeHs, nSet, aSet, idx, vol);
+        processHitsoundAtTime(edgeTime, edgeHs, nSet, aSet, idx, vol, fn);
       }
     }
   }

@@ -238,12 +238,26 @@ export class AudioEngine {
     if (cached) return cached;
 
     const setStr = lane.sampleSet.toLowerCase();
+    const addSetStr = lane.additionSet && lane.additionSet !== 'Auto' ? lane.additionSet.toLowerCase() : setStr;
     const addStr = lane.addition.toLowerCase();
     const idx = lane.customIndex || 0;
 
     // Check custom sample map (e.g. "soft-hitclap.wav", "soft-hitclap2.ogg")
     const searchKeys: string[] = [];
-    const baseName = lane.addition === 'None' ? `${setStr}-hitnormal` : `${setStr}-hit${addStr}`;
+
+    // Check customSampleName first if set
+    if (lane.customSampleName) {
+      const cleanCustom = lane.customSampleName.trim().toLowerCase();
+      const baseClean = cleanCustom.replace(/\.[^/.]+$/, '');
+      searchKeys.push(
+        cleanCustom,
+        `${baseClean}.wav`,
+        `${baseClean}.ogg`,
+        `${baseClean}.mp3`
+      );
+    }
+
+    const baseName = lane.addition === 'None' ? `${setStr}-hitnormal` : `${addSetStr}-hit${addStr}`;
 
     if (idx > 1) {
       searchKeys.push(`${baseName}${idx}.wav`, `${baseName}${idx}.ogg`, `${baseName}${idx}.mp3`);
