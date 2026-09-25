@@ -109,6 +109,10 @@ export class AudioEngine {
     this.laneBufferCache.clear();
   }
 
+  public clearLaneCache() {
+    this.laneBufferCache.clear();
+  }
+
   public setSongBuffer(buffer: AudioBuffer | null) {
     this.songBuffer = buffer;
     if (buffer) {
@@ -255,6 +259,11 @@ export class AudioEngine {
         `${baseClean}.ogg`,
         `${baseClean}.mp3`
       );
+      // Also check clean lane name if custom
+      const cleanLaneName = lane.name.trim().toLowerCase();
+      if (cleanLaneName) {
+        searchKeys.push(cleanLaneName, `${cleanLaneName}.wav`, `${cleanLaneName}.ogg`, `${cleanLaneName}.mp3`);
+      }
     }
 
     const baseName = lane.addition === 'None' ? `${setStr}-hitnormal` : `${addSetStr}-hit${addStr}`;
@@ -266,12 +275,6 @@ export class AudioEngine {
       searchKeys.push(`${baseName}.wav`, `${baseName}.ogg`, `${baseName}.mp3`);
     }
     searchKeys.push(`${baseName}.wav`, `${baseName}.ogg`, `${baseName}.mp3`);
-
-    // Also check clean lane name if custom
-    const cleanLaneName = lane.name.trim().toLowerCase();
-    if (cleanLaneName) {
-      searchKeys.push(cleanLaneName, `${cleanLaneName}.wav`, `${cleanLaneName}.ogg`, `${cleanLaneName}.mp3`);
-    }
 
     // 1. Check custom samples provided by mapset
     for (const key of searchKeys) {

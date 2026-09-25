@@ -400,4 +400,53 @@ if (fs.existsSync(fallenPath)) {
   console.log('[PASS] Test 12: Copier successfully combined multiple layered source objects into target hitobject!');
 }
 
-console.log('\n>>> ALL 12 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+// Test 13: Clear Custom Sample Names & Standard Naming Compliance
+{
+  const lanes13: Lane[] = [
+    { id: 'k1', name: 'Kicks 1', sampleSet: 'Soft', addition: 'None', additionSet: 'Auto', customIndex: 0, volume: 90, color: '#ffc400', muted: false, solo: false, customSampleName: 'Kicks 1' },
+    { id: 's1', name: 'snares 3', sampleSet: 'Drum', addition: 'Clap', additionSet: 'Auto', customIndex: 2, volume: 85, color: '#ff4081', muted: false, solo: false, customSampleName: 'snares 3' },
+  ];
+  const triggers13: Trigger[] = [
+    { id: 'tr13_1', laneId: 'k1', time: 7500 },
+    { id: 'tr13_2', laneId: 's1', time: 7500 },
+  ];
+
+  // 1. Before clearing: outputs custom filename references
+  const genBefore = generateHitsoundBeatmap(lanes13, triggers13, beatmap, 'Hitsounds');
+  const serializedBefore = serializeOsu(genBefore.beatmap);
+  if (!serializedBefore.includes(':Kicks 1') || !serializedBefore.includes(':snares 3')) {
+    throw new Error('Test 13: Expected custom filenames in serialized diff before clearing!');
+  }
+
+  // 2. Clear custom names (Simulating Option A: Clear Custom Names)
+  for (const l of lanes13) {
+    delete l.customSampleName;
+    delete l.audioBuffer;
+  }
+
+  // 3. After clearing: outputs clean ranking-criteria standard hitobject without filenames
+  const genAfter = generateHitsoundBeatmap(lanes13, triggers13, beatmap, 'Hitsounds');
+  const serializedAfter = serializeOsu(genAfter.beatmap);
+  if (serializedAfter.includes(':Kicks 1') || serializedAfter.includes(':snares 3')) {
+    throw new Error('Test 13: Expected NO custom filenames in serialized diff after clearing!');
+  }
+  const noteAfter = genAfter.beatmap.hitObjects.find((h) => h.time === 7500);
+  if (!noteAfter) throw new Error('Test 13: Note at 7500ms not found after clearing!');
+  if (noteAfter.hitSample.filename) throw new Error(`Test 13: Expected empty filename, got "${noteAfter.hitSample.filename}"`);
+  if (noteAfter.hitSound !== 8) throw new Error(`Test 13: Expected hitSound = 8 (Clap), got ${noteAfter.hitSound}`);
+  if (noteAfter.hitSample.normalSet !== 2) throw new Error(`Test 13: Expected normalSet = 2 (Soft), got ${noteAfter.hitSample.normalSet}`);
+  if (noteAfter.hitSample.additionSet !== 3) throw new Error(`Test 13: Expected additionSet = 3 (Drum), got ${noteAfter.hitSample.additionSet}`);
+  if (noteAfter.hitSample.index !== 2) throw new Error(`Test 13: Expected custom index = 2, got ${noteAfter.hitSample.index}`);
+
+  // 4. Verify standard vs non-standard sample detector regex
+  const stdRegex = /^(normal|soft|drum)-(hit(normal|whistle|finish|clap)|slider(slide|tick|whistle))\d*(\.(wav|ogg|mp3))?$/i;
+  if (!stdRegex.test('soft-hitclap.wav')) throw new Error('Test 13: soft-hitclap.wav should be recognized as standard');
+  if (!stdRegex.test('drum-hitnormal2.ogg')) throw new Error('Test 13: drum-hitnormal2.ogg should be recognized as standard');
+  if (!stdRegex.test('soft-hitwhistle')) throw new Error('Test 13: soft-hitwhistle without ext should be recognized as standard');
+  if (stdRegex.test('Kicks 1.wav')) throw new Error('Test 13: Kicks 1.wav should NOT be recognized as standard');
+  if (stdRegex.test('snares 3')) throw new Error('Test 13: snares 3 should NOT be recognized as standard');
+
+  console.log('[PASS] Test 13: Clear Custom Sample Names correctly strips filename tags and outputs clean ranking-compliant hitsounds!');
+}
+
+console.log('\n>>> ALL 13 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');

@@ -1481,7 +1481,9 @@ export class App {
       el.style.borderLeftColor = lane.color;
 
       const hasCustomSample = Boolean(lane.audioBuffer || lane.customSampleName);
-      const customSampleBadge = hasCustomSample ? `<span class="badge-custom-sample" title="Custom sample loaded">SAMPLE</span>` : '';
+      const customSampleBadge = hasCustomSample
+        ? `<span class="badge-custom-sample" title="Custom sample: ${lane.customSampleName || 'loaded audio'}&#10;Click to clear & use standard hitsounds">SAMPLE ✕</span>`
+        : '';
 
       el.innerHTML = `
         <div class="lane-top-row">
@@ -1574,6 +1576,21 @@ export class App {
       });
 
       // Event bindings for this lane
+      const badgeSample = el.querySelector('.badge-custom-sample') as HTMLElement | null;
+      if (badgeSample) {
+        badgeSample.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const oldName = lane.customSampleName || 'custom sample';
+          delete lane.customSampleName;
+          delete lane.audioBuffer;
+          this.laneDroppedSamples.delete(lane.id);
+          this.audioEngine.clearLaneCache();
+          this.renderLanesList();
+          this.updateSequencerData();
+          this.showToast(`Cleared "${oldName}" from lane. Standard hitsound controls active.`);
+        });
+      }
+
       const nameInput = el.querySelector('.lane-name-input') as HTMLInputElement;
       nameInput.addEventListener('input', () => {
         lane.name = nameInput.value;
@@ -1916,9 +1933,25 @@ export class App {
     }
   }
 
+  public clearCustomSampleNames(): number {
+    let count = 0;
+    for (const lane of this.lanes) {
+      if (lane.customSampleName || lane.audioBuffer) {
+        delete lane.customSampleName;
+        delete lane.audioBuffer;
+        this.laneDroppedSamples.delete(lane.id);
+        count++;
+      }
+    }
+    this.audioEngine.clearLaneCache();
+    this.renderLanesList();
+    this.updateSequencerData();
+    return count;
+  }
+
   private checkNonStandardHitsounds(songAudioFilename: string) {
-    const standardOsuSampleRegex = /^(normal|soft|drum)-(hit(normal|whistle|finish|clap)|slider(slide|tick|whistle))\d*\.(wav|ogg|mp3)$/i;
-    const standardMiscSampleRegex = /^(spinnerbonus|spinnerspin|combobreak|sectionpass|sectionfail|nightcore-(clap|finish|hat|kick)|pause-loop|applause)\d*\.(wav|ogg|mp3)$/i;
+    const standardOsuSampleRegex = /^(normal|soft|drum)-(hit(normal|whistle|finish|clap)|slider(slide|tick|whistle))\d*(\.(wav|ogg|mp3))?$/i;
+    const standardMiscSampleRegex = /^(spinnerbonus|spinnerspin|combobreak|sectionpass|sectionfail|nightcore-(clap|finish|hat|kick)|pause-loop|applause)\d*(\.(wav|ogg|mp3))?$/i;
 
     const nonStandard: string[] = [];
     const songLower = (songAudioFilename || '').toLowerCase();
@@ -1934,6 +1967,16 @@ export class App {
 
       if (!standardOsuSampleRegex.test(lower) && !standardMiscSampleRegex.test(lower)) {
         nonStandard.push(filename);
+      }
+    }
+
+    for (const lane of this.lanes) {
+      if (lane.customSampleName) {
+        const fn = lane.customSampleName.trim();
+        const lower = fn.toLowerCase();
+        if (!standardOsuSampleRegex.test(lower) && !standardMiscSampleRegex.test(lower) && !nonStandard.includes(fn)) {
+          nonStandard.push(fn);
+        }
       }
     }
 
@@ -1956,7 +1999,7 @@ export class App {
     const moreCount = files.length > 10 ? `<div class="naming-advisory-file-item" style="color:#8892b0">...and ${files.length - 10} more</div>` : '';
 
     backdrop.innerHTML = `
-      <div class="session-modal" style="width: 540px;" role="dialog" aria-modal="true">
+      <div class="session-modal" style="width: 580px; max-width: 95vw;" role="dialog" aria-modal="true">
         <div class="session-modal-header" style="background: #251c14;">
           <span class="session-modal-tag" style="color: #ffb74d;">⚠️ Hitsound Naming Advisory</span>
           <button class="btn-close-modal" id="btn-naming-modal-close" title="Dismiss">✕</button>
@@ -1964,12 +2007,32 @@ export class App {
         <div class="session-modal-body">
           <h2 class="session-modal-title" style="font-size: 1.15rem;">Custom Hitsound File Names Detected</h2>
           <p class="session-modal-desc">
-            This mapset contains <strong>${files.length}</strong> audio sample(s) that don't match osu!'s standard hitsound naming convention:
+            This mapset contains <strong>${files.length}</strong> audio sample(s) that don't match osu!'s standard hitsound naming convention (e.g. <code>kicks 1.wav</code> instead of <code>drum-hitnormal.wav</code>).
           </p>
 
           <div class="naming-advisory-file-list">
             ${fileListHtml}
             ${moreCount}
+          </div>
+
+          <div class="naming-choice-cards">
+            <div class="naming-choice-card option-clear">
+              <strong class="choice-title" style="color: #ffb74d;">
+                <span>⚡</span> Option A: Clear Custom Names (Configure Manually)
+              </strong>
+              <p class="choice-desc">
+                Strips custom filenames from lanes so you can assign standard <strong>SampleSet</strong>, <strong>Addition</strong>, and <strong>Index</strong> parameters manually. The exported diff will strictly follow official osu! ranking criteria without non-standard filename references.
+              </p>
+            </div>
+
+            <div class="naming-choice-card option-preserve">
+              <strong class="choice-title" style="color: #4fc3f7;">
+                <span>💾</span> Option B: Preserve Custom Names
+              </strong>
+              <p class="choice-desc">
+                Preserves custom sample names and exports them directly via hitobject filename parameters (e.g. <code>:Kicks 1</code>). Recommended for mania keysounding, storyboards, or test diffs.
+              </p>
+            </div>
           </div>
 
           <div class="naming-advisory-guide-card">
@@ -1984,29 +2047,47 @@ export class App {
               <li><strong>Additions:</strong> <code>normal</code>, <code>whistle</code>, <code>finish</code>, <code>clap</code></li>
             </ul>
           </div>
-
-          <p style="font-size: 0.78rem; color: #8892b0; margin-top: 8px;">
-            ℹ️ <strong>Hitsound Studio will continue to work normally</strong> and preserve your custom samples. However, if you plan to submit or rank your map, osu! ranking criteria recommends renaming them.
-          </p>
         </div>
         <div class="session-modal-actions">
-          <button id="btn-naming-modal-ok" class="btn btn-primary" style="min-width: 120px;">Got It</button>
+          <button id="btn-naming-clear" class="btn btn-secondary" style="border-color: #ffb74d; color: #ffb74d;">
+            ⚡ Clear Custom Names
+          </button>
+          <button id="btn-naming-preserve" class="btn btn-primary" style="min-width: 150px;">
+            Keep Custom Names
+          </button>
         </div>
       </div>
     `;
 
     document.body.appendChild(backdrop);
 
-    const close = () => backdrop.remove();
-    document.getElementById('btn-naming-modal-close')?.addEventListener('click', close);
-    document.getElementById('btn-naming-modal-ok')?.addEventListener('click', close);
+    const close = () => {
+      window.removeEventListener('keydown', keyHandler);
+      backdrop.remove();
+    };
+
+    document.getElementById('btn-naming-modal-close')?.addEventListener('click', () => {
+      close();
+    });
+
+    document.getElementById('btn-naming-preserve')?.addEventListener('click', () => {
+      this.showToast('💾 Preserved custom sample names.');
+      close();
+    });
+
+    document.getElementById('btn-naming-clear')?.addEventListener('click', () => {
+      const cleared = this.clearCustomSampleNames();
+      this.showToast(`⚡ Cleared custom sample names from ${cleared} lane(s). Standard naming active!`);
+      close();
+    });
+
     backdrop.addEventListener('click', (e) => {
       if (e.target === backdrop) close();
     });
+
     const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' || e.key === 'Enter') {
+      if (e.key === 'Escape') {
         close();
-        window.removeEventListener('keydown', keyHandler);
       }
     };
     window.addEventListener('keydown', keyHandler);
