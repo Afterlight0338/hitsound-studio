@@ -10,6 +10,8 @@ export interface CachedProjectData {
   timingPoints: TimingPoint[];
   allBeatmaps: OsuBeatmap[];
   referenceVersion: string | null;
+  diffMode?: 'hitsounds' | 'ghost';
+  hsSourceVersion?: string | null;
   savedAt: number;
 }
 

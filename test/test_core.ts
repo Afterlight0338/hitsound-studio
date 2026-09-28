@@ -130,6 +130,10 @@ for (const ho of hsResult.beatmap.hitObjects) {
   }
 }
 console.log('[PASS] Verified all generated notes are placed at (256, 192)');
+if (hsResult.beatmap.general.StackLeniency !== '0' || !hsResult.osuString.includes('StackLeniency: 0\r\n')) {
+  throw new Error(`Hitsound diff StackLeniency must be 0, got ${hsResult.beatmap.general.StackLeniency}`);
+}
+console.log('[PASS] Hitsound diff exports StackLeniency: 0');
 
 // Assert combined bitmask at 9325ms
 const note9325 = hsResult.beatmap.hitObjects.find((h) => h.time === 9325);
@@ -450,3 +454,33 @@ if (fs.existsSync(fallenPath)) {
 }
 
 console.log('\n>>> ALL 13 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+
+// Test 14: custom sample rename (files + references)
+{
+  const { findNonStandardSamples, suggestStandardNames, validateRename, renameSamplesInOsuText, sampleStem } = await import('../src/osu/sampleNaming');
+  const zip = new Map<string, Uint8Array>([
+    ['audio.mp3', new Uint8Array(100)],
+    ['kicks 1.wav', new Uint8Array(100)],
+    ['soft-hitclap2.wav', new Uint8Array(100)],
+    ['silent.wav', new Uint8Array(44)],
+  ]);
+  const osu = '[Events]\r\nSample,100,0,"Kicks 1.wav",70\r\n[HitObjects]\r\n256,192,100,1,0,0:0:0:80:Kicks 1\r\n256,192,200,1,8,2:2:2:80:\r\n';
+  const bm = parseOsu(osu, 'x.osu');
+  bm.general.AudioFilename = 'audio.mp3';
+  const lanes = [{ id: 'a', name: 'k', sampleSet: 'Soft', addition: 'None', additionSet: 'Auto', customIndex: 0, volume: 80, color: '', muted: false, solo: false, customSampleName: 'Kicks 1' }] as Lane[];
+
+  const pending = findNonStandardSamples(zip, [bm], lanes, 'audio.mp3');
+  if (pending.length !== 1 || pending[0] !== 'kicks 1.wav') throw new Error(`Test 14: expected [kicks 1.wav], got ${JSON.stringify(pending)}`);
+
+  const suggestion = suggestStandardNames(pending, zip, [bm]).get('kicks 1.wav')!;
+  if (suggestion !== 'drum-hitnormal3.wav') throw new Error(`Test 14: expected drum-hitnormal3.wav (2 is taken), got ${suggestion}`);
+  if (!validateRename('kick.wav', new Set())) throw new Error('Test 14: non-standard target must be rejected');
+  if (!validateRename('soft-hitclap2.wav', new Set(['soft-hitclap2']))) throw new Error('Test 14: taken name must be rejected');
+  if (validateRename(suggestion, new Set())) throw new Error('Test 14: suggestion must validate');
+
+  const out = renameSamplesInOsuText(osu, new Map([[sampleStem('kicks 1.wav'), suggestion]]));
+  if (!out.includes('0:0:0:80:drum-hitnormal3.wav\r\n') || !out.includes('"drum-hitnormal3.wav"') || !out.includes('2:2:2:80:\r\n')) {
+    throw new Error(`Test 14: rename not applied correctly:\n${out}`);
+  }
+  console.log('[PASS] Test 14: non-standard samples detected, suggested, validated and renamed in .osu text');
+}

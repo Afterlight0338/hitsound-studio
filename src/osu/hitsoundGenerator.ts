@@ -250,6 +250,7 @@ export function generateHitsoundBeatmap(
       ...baseBeatmap.general,
       AudioFilename: baseBeatmap.general.AudioFilename || 'audio.mp3',
       SampleSet: baseBeatmap.general.SampleSet || 'Soft',
+      StackLeniency: '0', // every note sits at (256,192); stacking would scatter them
       Mode: '0', // Standard
     },
     editor: {

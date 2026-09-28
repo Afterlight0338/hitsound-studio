@@ -6,6 +6,13 @@ import { generateHitsoundBeatmap } from '../osu/hitsoundGenerator';
 import { importHitsoundsFromBeatmap } from '../osu/hitsoundImporter';
 import { parseOsu } from '../osu/parser';
 import {
+  findNonStandardSamples,
+  renameSamplesInOsuText,
+  sampleStem,
+  suggestStandardNames,
+  validateRename,
+} from '../osu/sampleNaming';
+import {
   clearSessionCache,
   loadSessionFromCache,
   saveSessionToCache,
@@ -19,6 +26,8 @@ import type {
   TimingPoint,
   Trigger,
 } from '../types';
+
+const esc = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 export class App {
   private audioEngine: AudioEngine;
@@ -36,6 +45,12 @@ export class App {
   private laneDroppedSamples: Map<string, Uint8Array> = new Map();
   private autoSaveTimeout: number | null = null;
 
+  // 'hitsounds': picking a diff loads its hitsounds into the lanes and ghosts it.
+  // 'ghost': picking a diff only changes the ghost; lanes stay as they are.
+  private diffMode: 'hitsounds' | 'ghost' = 'hitsounds';
+  private hsSourceVersion: string | null = null; // diff the current lanes were loaded from
+  private diffLaneCache = new Map<string, { lanes: Lane[]; triggers: Trigger[] }>(); // unsaved edits per diff
+
   public activeTab: 'studio' | 'copier' = 'studio';
   private title = 'New Project';
   private artist = 'Unknown Artist';
@@ -52,8 +67,23 @@ export class App {
   private toastTimeout: number | null = null;
   private isCompactLanes: boolean = false;
 
+  // Conservative defaults: the old 80/90 blasted people on first visit
+  private songVolume = App.savedVolume('song', 40);
+  private hsVolume = App.savedVolume('hs', 35);
+
+  private static savedVolume(kind: 'song' | 'hs', fallback: number): number {
+    try {
+      const v = parseInt(localStorage.getItem(`hs-vol-${kind}`) ?? '', 10);
+      return isNaN(v) ? fallback : Math.max(0, Math.min(100, v));
+    } catch {
+      return fallback;
+    }
+  }
+
   constructor() {
     this.audioEngine = new AudioEngine();
+    this.audioEngine.setSongVolume(this.songVolume / 100);
+    this.audioEngine.setHitsoundVolume(this.hsVolume / 100);
     this.initDefaultLanes();
     this.initDefaultTiming();
   }
@@ -142,33 +172,34 @@ export class App {
     const root = document.getElementById('app')!;
     root.innerHTML = `
       <div class="studio-app">
-        <!-- Top Navigation & Transport Bar -->
         <header class="top-bar">
-          <div class="brand">
-            <span class="logo-icon">⚡</span>
-            <span class="logo-text">HITSOUND STUDIO</span>
-            <span class="badge">OSU!</span>
+          <div class="bar-group">
+            <span class="brand">hitsound<span>studio</span></span>
+            <nav class="tabs">
+              <button id="tab-studio" class="tab-btn active">Studio</button>
+              <button id="tab-copier" class="tab-btn">Copier</button>
+            </nav>
           </div>
 
-          <div class="transport">
-            <button id="btn-play" class="btn btn-primary" title="Play / Pause (Space)">
-              <span id="play-icon">▶</span>
+          <div class="bar-group transport">
+            <button id="btn-play" class="icon-btn play" title="Play / Pause (Space)" aria-label="Play">
+              <svg id="play-icon" viewBox="0 0 16 16" width="14" height="14"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
             </button>
-            <button id="btn-stop" class="btn btn-secondary" title="Return to start (Home)">⏮</button>
-            <div class="time-display" id="time-display">00:00.000</div>
-            <div class="bpm-display" id="bpm-display" title="Active BPM at playhead">120 BPM</div>
-
-            <div class="transport-group">
-              <label>Rate:</label>
-              <select id="select-rate" class="dropdown">
-                <option value="0.5">0.5x</option>
-                <option value="0.75">0.75x</option>
-                <option value="1.0" selected>1.0x</option>
-              </select>
+            <button id="btn-stop" class="icon-btn" title="Back to start (Home)" aria-label="Back to start">
+              <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 3h2v10H3zM14 3v10L6 8z" fill="currentColor"/></svg>
+            </button>
+            <div class="readout">
+              <span class="time-display" id="time-display">00:00.000</span>
+              <span class="bpm-display" id="bpm-display" title="BPM at playhead">120 BPM</span>
             </div>
-
-            <div class="transport-group">
-              <label>Snap:</label>
+            <label class="field rate-field">Rate
+              <select id="select-rate" class="dropdown">
+                <option value="0.5">0.5×</option>
+                <option value="0.75">0.75×</option>
+                <option value="1.0" selected>1×</option>
+              </select>
+            </label>
+            <label class="field">Snap
               <select id="select-snap" class="dropdown">
                 <option value="1">1/1</option>
                 <option value="2">1/2</option>
@@ -179,176 +210,130 @@ export class App {
                 <option value="12">1/12</option>
                 <option value="16">1/16</option>
               </select>
-            </div>
-
-            <div class="transport-group">
-              <label>Zoom:</label>
-              <input type="range" id="slider-zoom" min="30" max="3000" value="220" class="range-slider">
-            </div>
-
-            <div class="transport-group volumes">
-              <span>🎵</span>
-              <input type="range" id="vol-song" min="0" max="100" value="80" title="Song Volume" class="range-slider mini">
-              <input type="number" id="num-vol-song" min="0" max="100" value="80" class="vol-num-input" title="Song Volume %"><span class="pct-sign">%</span>
-              <span>🔔</span>
-              <input type="range" id="vol-hs" min="0" max="100" value="90" title="Hitsound Volume" class="range-slider mini">
-              <input type="number" id="num-vol-hs" min="0" max="100" value="90" class="vol-num-input" title="Hitsound Volume %"><span class="pct-sign">%</span>
+            </label>
+            <label class="field zoom-field">Zoom
+              <input type="range" id="slider-zoom" min="30" max="3000" value="220" class="range-slider zoom">
+            </label>
+            <div class="field volumes">
+              <label title="Song volume">Song
+                <input type="range" id="vol-song" min="0" max="100" value="${this.songVolume}" class="range-slider mini">
+              </label>
+              <input type="number" id="num-vol-song" min="0" max="100" value="${this.songVolume}" class="vol-num-input" aria-label="Song volume %">
+              <label title="Hitsound volume">Hitsounds
+                <input type="range" id="vol-hs" min="0" max="100" value="${this.hsVolume}" class="range-slider mini">
+              </label>
+              <input type="number" id="num-vol-hs" min="0" max="100" value="${this.hsVolume}" class="vol-num-input" aria-label="Hitsound volume %">
             </div>
           </div>
 
-          <div class="header-actions">
-            <nav class="tabs">
-              <button id="tab-studio" class="tab-btn active">Studio</button>
-              <button id="tab-copier" class="tab-btn">Hitsound Copier</button>
-            </nav>
-
-            <button id="btn-reset" class="btn btn-outline" title="Reset all and start fresh">🔄 Reset</button>
-            <label class="btn btn-outline file-btn">
-              Import .osz / .osu
-              <input type="file" id="file-input" accept="*/*" multiple hidden>
+          <div class="bar-group">
+            <label class="btn file-btn">
+              Import
+              <input type="file" id="file-input" accept=".osz,.zip,.osu,.mp3,.ogg,.wav" multiple hidden>
             </label>
-            <button id="btn-export-diff" class="btn btn-success">Export [Hitsounds].osu</button>
-            <button id="btn-download-osz" class="btn btn-accent" title="Download updated .osz package">Save .osz</button>
+            <button id="btn-export-diff" class="btn" title="Download the [Hitsounds] diff">Export .osu</button>
+            <button id="btn-download-osz" class="btn btn-primary" title="Copy hitsounds into the checked diffs and download the mapset">Save .osz</button>
+            <button id="btn-reset" class="icon-btn" title="Reset project" aria-label="Reset project">
+              <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 3a5 5 0 1 1-4.9 6h1.6A3.5 3.5 0 1 0 8 4.5V7L4.5 3.75 8 .5z" fill="currentColor"/></svg>
+            </button>
           </div>
         </header>
 
-        <!-- Main Workspace View -->
         <main class="main-workspace">
-          <!-- STUDIO VIEW -->
           <div id="view-studio" class="view-panel active">
-            <!-- Left Channel Rack -->
             <aside class="channel-rack">
-              <!-- Top header container: EXACTLY 64px to align with canvas rulerHeight -->
+              <!-- exactly 64px: must match the canvas rulerHeight -->
               <div class="rack-header-container">
                 <div class="rack-top-line">
-                  <span id="rack-lanes-title" class="rack-title">LANES (${this.lanes.length})</span>
+                  <span id="rack-lanes-title" class="rack-title">Lanes</span>
                   <div class="rack-top-actions">
-                    <button id="btn-toggle-compact" class="btn btn-sm btn-outline" title="Toggle compact lanes mode (see more lanes)">⊟ Compact</button>
+                    <button id="btn-toggle-compact" class="btn btn-sm btn-ghost" title="Compact lanes">Compact</button>
                     <div class="add-lane-btn-group">
-                      <button id="btn-add-lane" class="btn btn-sm btn-primary">+ Add Lane</button>
-                      <button id="btn-add-lane-menu" class="btn btn-sm btn-primary btn-arrow" title="Add specific addition lane">▾</button>
+                      <button id="btn-add-lane" class="btn btn-sm">+ Lane</button>
+                      <button id="btn-add-lane-menu" class="btn btn-sm btn-arrow" title="Add a specific addition lane" aria-label="More lane types">▾</button>
                       <div id="add-lane-menu" class="add-lane-menu" style="display: none;">
-                        <div class="add-lane-menu-item" data-add="Clap">👏 Add Soft Clap</div>
-                        <div class="add-lane-menu-item" data-add="Whistle">🎵 Add Soft Whistle</div>
-                        <div class="add-lane-menu-item" data-add="Finish">💥 Add Soft Finish</div>
-                        <div class="add-lane-menu-item" data-add="None">🥁 Add HitNormal</div>
+                        <div class="add-lane-menu-item" data-add="None">Soft hitnormal</div>
+                        <div class="add-lane-menu-item" data-add="Whistle">Soft whistle</div>
+                        <div class="add-lane-menu-item" data-add="Finish">Soft finish</div>
+                        <div class="add-lane-menu-item" data-add="Clap">Soft clap</div>
                       </div>
                     </div>
                   </div>
                 </div>
                 <div class="rack-sub-line">
-                  <label style="font-size:0.75rem; color:var(--text-muted)">Ghost:</label>
-                  <select id="select-reference-diff" class="dropdown" style="flex:1">
-                    <option value="">None</option>
+                  <select id="select-reference-diff" class="dropdown" title="Difficulty">
+                    <option value="">No diff</option>
                   </select>
-                  <button id="btn-toggle-ghost" class="btn btn-sm btn-outline active" title="Toggle ghost notes visibility (G)">👁</button>
-                  <button id="btn-import-hs-diff" class="btn btn-sm btn-outline" title="Convert an existing diff into editable lanes">📥 From Diff</button>
+                  <div class="segmented" role="group" aria-label="What selecting a diff shows">
+                    <button data-diff-mode="hitsounds" class="active" title="Selecting a diff loads its hitsounds into the lanes and shows its notes as ghosts">Hitsounds</button>
+                    <button data-diff-mode="ghost" title="Selecting a diff only changes the ghost notes; lanes stay as they are">Ghost only</button>
+                  </div>
+                  <button id="btn-toggle-ghost" class="icon-btn sm active" title="Show ghost notes (G)" aria-label="Show ghost notes">
+                    <svg viewBox="0 0 16 16" width="13" height="13"><path d="M8 3C4 3 1.5 8 1.5 8S4 13 8 13s6.5-5 6.5-5S12 3 8 3zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6z" fill="currentColor"/></svg>
+                  </button>
                 </div>
               </div>
-
-              <!-- Lane Items Container -->
               <div id="lanes-list" class="lanes-list"></div>
             </aside>
 
-            <!-- Sequencer Canvas Area -->
             <div class="sequencer-container">
               <canvas id="sequencer-canvas"></canvas>
               <div class="hint-bar">
-                💡 <strong>Click</strong>: Place | <strong>Drag</strong>: Select | <strong>W/E/R</strong>: Toggle Additions | <strong>Drop audio</strong>: Load Sample | <strong>Ctrl+Z</strong>: Undo | <strong>C / V</strong>: Copy/Paste
+                <span><kbd>Click</kbd> place</span><span><kbd>Drag</kbd> select</span><span><kbd>W</kbd><kbd>E</kbd><kbd>R</kbd> additions</span><span><kbd>C</kbd><kbd>V</kbd> copy/paste</span><span>Drop audio on a lane to load a sample</span>
               </div>
             </div>
           </div>
 
-          <!-- COPIER VIEW -->
           <div id="view-copier" class="view-panel">
             <div class="copier-container">
               <div class="copier-card">
-                <h2>⚡ Built-In Hitsound Copier</h2>
+                <h2>Hitsound copier</h2>
                 <p class="subtitle">
-                  Bake hitsounds from the studio project or a source diff directly into your mapset's difficulties.
-                  <strong>Preserves Slider Velocity (SV)</strong> while transferring additions, custom indices, and volumes.
+                  Copies the studio hitsounds into your difficulties. Slider velocity is left untouched.
                 </p>
 
                 <div class="copier-grid">
-                  <!-- Left: Source & Targets -->
                   <div class="copier-col">
                     <div class="form-group">
-                      <label>Source Beatmap:</label>
-                      <select id="copier-source" class="dropdown full-width">
-                        <option value="__current__">Current Studio Project ([Hitsounds])</option>
-                      </select>
-                    </div>
-
-                    <div class="form-group">
                       <div class="flex-between">
-                        <label>Target Difficulties:</label>
+                        <label>Target difficulties</label>
                         <div>
-                          <button id="btn-select-all-diffs" class="btn-link">Select All</button>
+                          <button id="btn-select-all-diffs" class="btn-link">All</button>
                           <button id="btn-deselect-all-diffs" class="btn-link">None</button>
                         </div>
                       </div>
                       <div id="copier-targets-list" class="checkbox-list">
-                        <div class="empty-state">No other difficulties loaded yet. Import an .osz file.</div>
+                        <div class="empty-state">Import an .osz to pick target difficulties.</div>
                       </div>
                     </div>
                   </div>
 
-                  <!-- Right: Options -->
                   <div class="copier-col">
-                    <h3>Copy Options</h3>
                     <div class="form-group inline">
-                      <label>Snap Tolerance:</label>
+                      <label for="copier-snap">Snap tolerance</label>
                       <input type="number" id="copier-snap" value="5" min="0" max="25" class="input-num">
-                      <span>ms</span>
+                      <span class="muted">ms</span>
                     </div>
 
                     <div class="options-list">
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-additions" checked>
-                        Copy HitObject Additions (Whistle / Finish / Clap)
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-samplesets" checked>
-                        Copy SampleSets (Soft / Normal / Drum)
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-indices" checked>
-                        Copy Custom Sample Indices
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-volumes" checked>
-                        Copy Volumes & Green Timing Points (preserves target SV)
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-heads" checked>
-                        Copy to Slider Heads
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-repeats" checked>
-                        Copy to Slider Repeat Arrows
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-tails" checked>
-                        Copy to Slider Tails
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-spinners" checked>
-                        Copy to Spinners
-                      </label>
-                      <label class="checkbox-label">
-                        <input type="checkbox" id="opt-clean">
-                        Clean unmatched notes (remove old hitsounds on notes with no match)
-                      </label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-additions" checked> Additions (whistle, finish, clap)</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-samplesets" checked> Sample sets</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-indices" checked> Custom indices</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-volumes" checked> Volumes and green lines</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-heads" checked> Slider heads</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-repeats" checked> Slider repeats</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-tails" checked> Slider tails</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-spinners" checked> Spinners</label>
+                      <label class="checkbox-label"><input type="checkbox" id="opt-clean"> Clear hitsounds on unmatched notes</label>
                     </div>
 
                     <div class="copier-actions">
-                      <button id="btn-run-copier" class="btn btn-primary btn-lg">Copy Hitsounds & Download .osz</button>
-                      <button id="btn-download-diffs-zip" class="btn btn-secondary btn-lg">Download Updated .osu Files</button>
+                      <button id="btn-run-copier" class="btn btn-primary btn-lg">Copy and download .osz</button>
+                      <button id="btn-download-diffs-zip" class="btn btn-lg">Download .osu files only</button>
                     </div>
                   </div>
                 </div>
 
-                <!-- Copier Result Console -->
                 <div id="copier-console" class="copier-console"></div>
               </div>
             </div>
@@ -477,6 +462,7 @@ export class App {
   }
 
   private updateSequencerData() {
+    this.updateTimeDisplay(this.sequencer.currentTimeMs);
     const ghostObjects = this.referenceBeatmap ? this.referenceBeatmap.hitObjects : [];
     this.sequencer.updateData(
       this.lanes,
@@ -498,7 +484,7 @@ export class App {
     this.audioEngine.onStateChange = (isPlaying) => {
       const icon = document.getElementById('play-icon');
       if (icon) {
-        icon.textContent = isPlaying ? '⏸' : '▶';
+        icon.innerHTML = isPlaying ? '<path d="M4 3h3v10H4zM9 3h3v10H9z" fill="currentColor"/>' : '<path d="M4 2.5v11l9-5.5z" fill="currentColor"/>';
       }
       if (isPlaying) {
         this.startPlaybackLoop();
@@ -566,43 +552,21 @@ export class App {
       this.sequencer.setZoom(zoom);
     });
 
-    // Volumes: slider <-> numeric % input sync
-    const volSongSlider = document.getElementById('vol-song') as HTMLInputElement;
-    const numVolSong = document.getElementById('num-vol-song') as HTMLInputElement;
-    const volHsSlider = document.getElementById('vol-hs') as HTMLInputElement;
-    const numVolHs = document.getElementById('num-vol-hs') as HTMLInputElement;
-
-    volSongSlider?.addEventListener('input', () => {
-      const val = parseInt(volSongSlider.value, 10) || 0;
-      if (numVolSong) numVolSong.value = String(val);
-      this.audioEngine.setSongVolume(val / 100);
-    });
-    numVolSong?.addEventListener('input', () => {
-      let val = parseInt(numVolSong.value, 10);
-      if (isNaN(val)) val = 0;
-      val = Math.max(0, Math.min(100, val));
-      if (volSongSlider) volSongSlider.value = String(val);
-      this.audioEngine.setSongVolume(val / 100);
-    });
-    numVolSong?.addEventListener('blur', () => {
-      numVolSong.value = volSongSlider ? volSongSlider.value : '80';
-    });
-
-    volHsSlider?.addEventListener('input', () => {
-      const val = parseInt(volHsSlider.value, 10) || 0;
-      if (numVolHs) numVolHs.value = String(val);
-      this.audioEngine.setHitsoundVolume(val / 100);
-    });
-    numVolHs?.addEventListener('input', () => {
-      let val = parseInt(numVolHs.value, 10);
-      if (isNaN(val)) val = 0;
-      val = Math.max(0, Math.min(100, val));
-      if (volHsSlider) volHsSlider.value = String(val);
-      this.audioEngine.setHitsoundVolume(val / 100);
-    });
-    numVolHs?.addEventListener('blur', () => {
-      numVolHs.value = volHsSlider ? volHsSlider.value : '90';
-    });
+    // Volumes: slider <-> numeric % input sync, remembered per browser
+    const bindVolume = (kind: 'song' | 'hs', apply: (v: number) => void) => {
+      const slider = document.getElementById(`vol-${kind}`) as HTMLInputElement;
+      const num = document.getElementById(`num-vol-${kind}`) as HTMLInputElement;
+      const set = (raw: string) => {
+        const val = Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
+        slider.value = num.value = String(val);
+        apply(val / 100);
+        try { localStorage.setItem(`hs-vol-${kind}`, String(val)); } catch {}
+      };
+      slider.addEventListener('input', () => set(slider.value));
+      num.addEventListener('change', () => set(num.value));
+    };
+    bindVolume('song', (v) => this.audioEngine.setSongVolume(v));
+    bindVolume('hs', (v) => this.audioEngine.setHitsoundVolume(v));
 
     // Tabs
     document.getElementById('tab-studio')?.addEventListener('click', () => this.switchTab('studio'));
@@ -672,32 +636,16 @@ export class App {
       this.sequencer.render();
     });
 
-    // Reference Diff selector
+    // Diff selector + what selecting a diff does
     document.getElementById('select-reference-diff')?.addEventListener('change', (e) => {
       const ver = (e.target as HTMLSelectElement).value;
-      this.referenceBeatmap = this.allBeatmaps.find((bm) => (bm.metadata.Version || '') === ver) || null;
+      this.referenceBeatmap = this.allBeatmaps.find((bm) => this.versionOf(bm) === ver) || null;
+      if (this.diffMode === 'hitsounds' && this.referenceBeatmap) this.loadDiffHitsounds(this.referenceBeatmap);
       this.updateSequencerData();
     });
-
-    // Import from Diff button
-    document.getElementById('btn-import-hs-diff')?.addEventListener('click', () => {
-      if (this.allBeatmaps.length === 0) {
-        alert('No difficulties loaded. Import an .osz or .osu file first!');
-        return;
-      }
-      if (this.allBeatmaps.length === 1) {
-        this.importDiffIntoLanes(this.allBeatmaps[0], true);
-        return;
-      }
-      const list = this.allBeatmaps.map((bm, i) => `${i + 1}. [${bm.metadata.Version || bm.fileName}] (${bm.hitObjects.length} notes)`).join('\n');
-      const pick = prompt(`Select difficulty number to extract hitsounds from:\n\n${list}`, '1');
-      if (pick) {
-        const idx = parseInt(pick, 10) - 1;
-        if (idx >= 0 && idx < this.allBeatmaps.length) {
-          this.importDiffIntoLanes(this.allBeatmaps[idx], true);
-        }
-      }
-    });
+    document.querySelectorAll<HTMLButtonElement>('[data-diff-mode]').forEach((btn) =>
+      btn.addEventListener('click', () => this.setDiffMode(btn.dataset.diffMode as 'hitsounds' | 'ghost'))
+    );
 
     // Copier buttons
     document.getElementById('btn-select-all-diffs')?.addEventListener('click', () => {
@@ -909,7 +857,7 @@ export class App {
     }
 
     this.updateSequencerData();
-    this.showToast('↩ Undone');
+    this.showToast('Undone');
   }
 
   public redo() {
@@ -928,7 +876,7 @@ export class App {
     }
 
     this.updateSequencerData();
-    this.showToast('↪ Redone');
+    this.showToast('Redone');
   }
 
   public copySelected() {
@@ -944,7 +892,7 @@ export class App {
       relTime: tr.time - minTime,
       volume: tr.volume,
     }));
-    this.showToast(`📋 Copied ${this.clipboard.length} note${this.clipboard.length > 1 ? 's' : ''}`);
+    this.showToast(`Copied ${this.clipboard.length} note${this.clipboard.length > 1 ? 's' : ''}`);
   }
 
   public cutSelected() {
@@ -990,7 +938,7 @@ export class App {
 
     this.sequencer.selectedTriggerIds = newSelectedIds;
     this.updateSequencerData();
-    this.showToast(`📥 Pasted ${newSelectedIds.size} note${newSelectedIds.size > 1 ? 's' : ''}`);
+    this.showToast(`Pasted ${newSelectedIds.size} note${newSelectedIds.size > 1 ? 's' : ''}`);
   }
 
   public deleteSelected() {
@@ -1001,7 +949,7 @@ export class App {
     this.triggers = this.triggers.filter((t) => !idSet.has(t.id));
     this.sequencer.selectedTriggerIds.clear();
     this.updateSequencerData();
-    this.showToast(`🗑 Deleted ${count} note${count > 1 ? 's' : ''}`);
+    this.showToast(`Deleted ${count} note${count > 1 ? 's' : ''}`);
   }
 
   public selectAll() {
@@ -1056,7 +1004,7 @@ export class App {
   private formatRelativeTime(timestamp: number): string {
     const diffMs = Date.now() - timestamp;
     const diffSec = Math.floor(diffMs / 1000);
-    if (diffSec < 60) return 'Just now';
+    if (diffSec < 60) return 'just now';
     const diffMin = Math.floor(diffSec / 60);
     if (diffMin < 60) return `${diffMin}m ago`;
     const diffHour = Math.floor(diffMin / 60);
@@ -1080,49 +1028,33 @@ export class App {
     backdrop.className = 'modal-backdrop';
 
     backdrop.innerHTML = `
-      <div class="session-modal" role="dialog" aria-modal="true">
-        <div class="session-modal-header">
-          <span class="session-modal-tag">💾 Previous Session Found</span>
-          <button class="btn-close-modal" id="btn-modal-close" title="Dismiss">✕</button>
-        </div>
-        <div class="session-modal-body">
-          <h2 class="session-modal-title">Continue from previous session?</h2>
-          <p class="session-modal-desc">
-            We found your project from your previous studio session in your browser cache.
-          </p>
-
-          <div class="session-details-card">
-            <div class="session-details-title" title="${projectTitle}">${projectTitle}</div>
-            <div class="session-details-grid">
-              <div class="session-details-item">
-                <span>🔔</span>
-                <span><strong>${noteCount}</strong> notes placed</span>
-              </div>
-              <div class="session-details-item">
-                <span>🎚</span>
-                <span><strong>${laneCount}</strong> lanes configured</span>
-              </div>
-              <div class="session-details-item">
-                <span>📑</span>
-                <span><strong>${diffCount}</strong> difficulties</span>
-              </div>
-              <div class="session-details-item">
-                <span>🕒</span>
-                <span>Saved <strong>${timeStr}</strong></span>
-              </div>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="resume-title">
+        <header class="modal-header">
+          <h2 id="resume-title">Resume last session?</h2>
+          <button class="icon-btn" id="btn-modal-close" aria-label="Close">✕</button>
+        </header>
+        <div class="modal-body">
+          <div class="session-card">
+            <div class="session-title" title="${esc(projectTitle)}">${esc(projectTitle)}</div>
+            <div class="session-meta">
+              <span><strong>${noteCount}</strong> notes</span>
+              <span><strong>${laneCount}</strong> lanes</span>
+              <span><strong>${diffCount}</strong> diffs</span>
+              <span>saved ${timeStr}</span>
             </div>
           </div>
         </div>
-        <div class="session-modal-actions">
-          <button id="btn-modal-fresh" class="btn btn-secondary">Start Fresh</button>
-          <button id="btn-modal-resume" class="btn btn-primary btn-lg">⚡ Resume Session</button>
-        </div>
+        <footer class="modal-actions">
+          <button id="btn-modal-fresh" class="btn btn-ghost">Start fresh</button>
+          <button id="btn-modal-resume" class="btn btn-primary">Resume</button>
+        </footer>
       </div>
     `;
 
     document.body.appendChild(backdrop);
 
     const closeModal = () => {
+      window.removeEventListener('keydown', keyHandler);
       backdrop.remove();
     };
 
@@ -1134,7 +1066,7 @@ export class App {
     const handleFresh = async () => {
       closeModal();
       await clearSessionCache();
-      this.showToast('✨ Started fresh project');
+      this.showToast('Started fresh project');
     };
 
     document.getElementById('btn-modal-resume')?.addEventListener('click', handleResume);
@@ -1157,7 +1089,7 @@ export class App {
 
   public async resumeSession(cached: CachedSessionRecord) {
     try {
-      this.showToast('⏳ Resuming session...');
+      this.showToast('Resuming session…');
       const p = cached.project;
 
       this.title = p.title || this.title;
@@ -1202,10 +1134,13 @@ export class App {
 
       // Restore reference beatmap
       if (p.referenceVersion) {
-        this.referenceBeatmap = this.allBeatmaps.find((bm) => (bm.metadata.Version || '') === p.referenceVersion) || null;
+        this.referenceBeatmap = this.allBeatmaps.find((bm) => this.versionOf(bm) === p.referenceVersion) || null;
       } else if (this.allBeatmaps.length > 0) {
         this.referenceBeatmap = this.allBeatmaps[0];
       }
+      this.diffLaneCache.clear();
+      this.hsSourceVersion = p.hsSourceVersion ?? null;
+      this.setDiffMode(p.diffMode ?? 'ghost');
 
       // Update UI components
       this.updateBeatmapSelectors();
@@ -1213,10 +1148,10 @@ export class App {
       this.updateSequencerData();
       this.updateCopierTargetsList();
 
-      this.showToast(`✔ Resumed: ${this.artist} - ${this.title}`);
+      this.showToast(`Resumed: ${this.artist} - ${this.title}`);
     } catch (err) {
       console.error('Failed to resume session:', err);
-      this.showToast('❌ Error restoring previous session');
+      this.showToast('Error restoring previous session');
     }
   }
 
@@ -1282,7 +1217,9 @@ export class App {
         triggers: this.triggers,
         timingPoints: this.timingPoints,
         allBeatmaps: this.allBeatmaps,
-        referenceVersion: this.referenceBeatmap?.metadata?.Version || null,
+        referenceVersion: this.referenceBeatmap ? this.versionOf(this.referenceBeatmap) : null,
+        diffMode: this.diffMode,
+        hsSourceVersion: this.hsSourceVersion,
         savedAt: Date.now(),
       },
       songAudioBytes: this.rawSongAudioData || undefined,
@@ -1326,7 +1263,7 @@ export class App {
       rack.classList.toggle('is-compact', this.isCompactLanes);
     }
     if (btn) {
-      btn.textContent = this.isCompactLanes ? '⊞ Expand' : '⊟ Compact';
+      btn.textContent = this.isCompactLanes ? 'Expand' : 'Compact';
       btn.title = this.isCompactLanes ? 'Expand lanes to show all controls' : 'Compact lanes to see more tracks';
     }
     this.sequencer.setLaneHeight(this.isCompactLanes ? 28 : 58);
@@ -1465,7 +1402,7 @@ export class App {
     const container = document.getElementById('lanes-list');
     const titleEl = document.getElementById('rack-lanes-title');
     if (!container) return;
-    if (titleEl) titleEl.textContent = `LANES (${this.lanes.length})`;
+    if (titleEl) titleEl.textContent = `Lanes · ${this.lanes.length}`;
 
     container.innerHTML = '';
 
@@ -1482,21 +1419,21 @@ export class App {
 
       const hasCustomSample = Boolean(lane.audioBuffer || lane.customSampleName);
       const customSampleBadge = hasCustomSample
-        ? `<span class="badge-custom-sample" title="Custom sample: ${lane.customSampleName || 'loaded audio'}&#10;Click to clear & use standard hitsounds">SAMPLE ✕</span>`
+        ? `<span class="badge-custom-sample" title="Custom sample: ${esc(lane.customSampleName || 'dropped audio')}. Click to remove and use standard hitsounds">${esc(lane.customSampleName || 'sample')} ✕</span>`
         : '';
 
       el.innerHTML = `
         <div class="lane-top-row">
           <div class="lane-name-wrapper">
-            <span class="lane-activity-led" title="Active voice indicator"></span>
-            <input type="text" class="lane-name-input" value="${lane.name}" title="Rename lane">
+            <span class="lane-activity-led"></span>
+            <input type="text" class="lane-name-input" value="${esc(lane.name)}" title="Rename lane">
             ${customSampleBadge}
           </div>
           <div class="lane-btns">
-            <button class="btn-mute ${lane.muted ? 'active' : ''}" title="Mute lane">MUTE</button>
-            <button class="btn-solo ${lane.solo ? 'active' : ''}" title="Solo lane">SOLO</button>
-            <button class="btn-play-sample" title="Test sample">🔊</button>
-            <button class="btn-del-lane" title="Delete lane">✕</button>
+            <button class="btn-mute ${lane.muted ? 'active' : ''}" title="Mute lane">M</button>
+            <button class="btn-solo ${lane.solo ? 'active' : ''}" title="Solo lane">S</button>
+            <button class="btn-play-sample" title="Preview sample" aria-label="Preview sample"><svg viewBox="0 0 16 16" width="11" height="11"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg></button>
+            <button class="btn-del-lane" title="Delete lane"><svg viewBox="0 0 16 16" width="10" height="10"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.8"/></svg></button>
           </div>
         </div>
 
@@ -1568,10 +1505,10 @@ export class App {
           this.updateSequencerData();
           this.audioEngine.playSingleSample(lane);
           this.flashLane(lane.id);
-          this.showToast(`🎵 Loaded "${file.name}" to lane "${lane.name}"`);
+          this.showToast(`Loaded "${file.name}" to lane "${lane.name}"`);
         } catch (err) {
           console.error('Failed to decode dropped sample:', err);
-          this.showToast(`❌ Could not decode audio: ${file.name}`);
+          this.showToast(`Could not decode audio: ${file.name}`);
         }
       });
 
@@ -1686,22 +1623,54 @@ export class App {
 
   // --- Convert Existing Hitsound Diff into Lanes ---
 
-  public importDiffIntoLanes(beatmap: OsuBeatmap, showAlert: boolean = true) {
+  private versionOf(bm: OsuBeatmap): string {
+    return bm.metadata.Version || bm.fileName;
+  }
+
+  public importDiffIntoLanes(beatmap: OsuBeatmap) {
     const res = importHitsoundsFromBeatmap(beatmap, this.rawZipFiles);
+    this.hsSourceVersion = this.versionOf(beatmap);
+    this.diffLaneCache.delete(this.hsSourceVersion);
     if (res.lanes.length === 0) {
-      if (showAlert) alert('No hitsound notes found in selected difficulty.');
+      this.showToast(`No hitsounds in [${this.hsSourceVersion}]`);
       return;
     }
+    this.setLanes(res.lanes, res.triggers);
+  }
 
-    this.lanes = res.lanes;
-    this.triggers = res.triggers;
+  private setLanes(lanes: Lane[], triggers: Trigger[]) {
+    this.lanes = lanes;
+    this.triggers = triggers;
     this.undoStack = [];
     this.redoStack = [];
+    this.sequencer?.selectedTriggerIds.clear();
     this.renderLanesList();
     this.updateSequencerData();
-    if (showAlert) {
-      alert(`Imported ${res.lanes.length} lanes and ${res.importedNoteCount} hitsound triggers from [${beatmap.metadata.Version || 'Diff'}]!`);
+  }
+
+  /** Swaps the lanes to `bm`'s hitsounds, keeping edits made to the previous diff for when it comes back. */
+  private loadDiffHitsounds(bm: OsuBeatmap) {
+    const ver = this.versionOf(bm);
+    if (this.hsSourceVersion === ver) return;
+    if (this.hsSourceVersion) {
+      this.diffLaneCache.set(this.hsSourceVersion, { lanes: this.lanes, triggers: this.triggers });
     }
+    const cached = this.diffLaneCache.get(ver);
+    if (cached) {
+      this.hsSourceVersion = ver;
+      this.setLanes(cached.lanes, cached.triggers);
+    } else {
+      this.importDiffIntoLanes(bm);
+    }
+  }
+
+  private setDiffMode(mode: 'hitsounds' | 'ghost') {
+    this.diffMode = mode;
+    document.querySelectorAll<HTMLElement>('[data-diff-mode]').forEach((b) =>
+      b.classList.toggle('active', b.dataset.diffMode === mode)
+    );
+    if (mode === 'hitsounds' && this.referenceBeatmap) this.loadDiffHitsounds(this.referenceBeatmap);
+    this.updateSequencerData();
   }
 
   // --- Reset All Project State ---
@@ -1721,6 +1690,8 @@ export class App {
     this.allBeatmaps = [];
     this.referenceBeatmap = null;
     this.customSamples.clear();
+    this.diffLaneCache.clear();
+    this.hsSourceVersion = null;
 
     this.title = 'New Project';
     this.artist = 'Unknown Artist';
@@ -1749,9 +1720,6 @@ export class App {
     this.sequencer.resetView();
     this.updateSequencerData();
     this.updateTimeDisplay(0);
-
-    const playIcon = document.getElementById('play-icon');
-    if (playIcon) playIcon.textContent = '▶';
   }
 
   // --- File Ingestion (.osz, .osu, audio) ---
@@ -1768,7 +1736,7 @@ export class App {
         this.addBeatmap(parsed);
         const isHs = (parsed.metadata.Version || '').toLowerCase().includes('hitsound') || (parsed.metadata.Version || '').toLowerCase() === 'hs';
         if (isHs || this.triggers.length === 0) {
-          this.importDiffIntoLanes(parsed, false);
+          this.importDiffIntoLanes(parsed);
         }
       } else if (lower.endsWith('.mp3') || lower.endsWith('.ogg') || lower.endsWith('.wav')) {
         if (lower.includes('hit') || lower.includes('clap') || lower.includes('whistle') || lower.includes('finish') || lower.includes('slider')) {
@@ -1861,16 +1829,19 @@ export class App {
       );
       playableDiffs.sort((a, b) => b.hitObjects.length - a.hitObjects.length);
 
-      if (hsDiff) {
-        // Automatically import hitsound diff straight into lanes
-        this.importDiffIntoLanes(hsDiff, false);
-        // Default ghost notes to top playable diff
-        this.referenceBeatmap = playableDiffs[0] || hsDiff;
+      this.diffLaneCache.clear();
+      this.hsSourceVersion = null;
+      if (hsDiff && playableDiffs.length > 0) {
+        // Dedicated hitsound diff: edit it, ghost the densest playable diff
+        this.importDiffIntoLanes(hsDiff);
+        this.referenceBeatmap = playableDiffs[0];
+        this.setDiffMode('ghost');
       } else {
-        // Mapset without hitsound diff -> auto-separate top diff into lanes!
-        const topDiff = playableDiffs[0] || this.allBeatmaps[0];
+        // Every diff carries its own hitsounds: selecting a diff shows its hitsounds
+        const topDiff = playableDiffs[0] || hsDiff || this.allBeatmaps[0];
         this.referenceBeatmap = topDiff;
-        this.importDiffIntoLanes(topDiff, false);
+        this.importDiffIntoLanes(topDiff);
+        this.setDiffMode('hitsounds');
       }
 
       // 6. Fast Parallel Pre-decode for active lane samples
@@ -1926,171 +1897,131 @@ export class App {
       this.updateSequencerData();
 
       // 7. Check for non-standard hitsound sample filenames
-      this.checkNonStandardHitsounds(this.audioFileName || audioName);
+      this.checkNonStandardHitsounds();
     } catch (err) {
       console.error('Error importing .osz:', err);
       alert(`Failed to import .osz: ${err}`);
     }
   }
 
-  public clearCustomSampleNames(): number {
-    let count = 0;
-    for (const lane of this.lanes) {
-      if (lane.customSampleName || lane.audioBuffer) {
-        delete lane.customSampleName;
-        delete lane.audioBuffer;
-        this.laneDroppedSamples.delete(lane.id);
-        count++;
+  /** Non-standard sample names still waiting for a rename; export is blocked while this is non-empty. */
+  private pendingSampleRenames(): string[] {
+    return findNonStandardSamples(this.rawZipFiles, this.allBeatmaps, this.lanes, this.audioFileName);
+  }
+
+  /** Returns true when export may proceed; otherwise opens the rename dialog. */
+  private ensureStandardSampleNames(): boolean {
+    const pending = this.pendingSampleRenames();
+    if (pending.length === 0) return true;
+    this.showRenameSamplesModal(pending, true);
+    return false;
+  }
+
+  private checkNonStandardHitsounds() {
+    const pending = this.pendingSampleRenames();
+    if (pending.length > 0) this.showRenameSamplesModal(pending, false);
+  }
+
+  /** Renames sample files in the archive and every reference to them (all diffs, storyboard, lanes). */
+  private applySampleRenames(renames: Map<string, string>) {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder('utf-8');
+    for (const [name, bytes] of [...this.rawZipFiles]) {
+      if (/\.(wav|ogg|mp3)$/i.test(name) && renames.has(sampleStem(name))) {
+        this.rawZipFiles.delete(name);
+        this.rawZipFiles.set(renames.get(sampleStem(name))!, bytes);
+      } else if (/\.(osu|osb)$/i.test(name)) {
+        this.rawZipFiles.set(name, enc.encode(renameSamplesInOsuText(dec.decode(bytes), renames)));
       }
     }
-    this.audioEngine.clearLaneCache();
+
+    const refVer = this.referenceBeatmap ? this.versionOf(this.referenceBeatmap) : null;
+    this.allBeatmaps = this.allBeatmaps.map((bm) => parseOsu(renameSamplesInOsuText(bm.rawText, renames), bm.fileName));
+    this.referenceBeatmap = this.allBeatmaps.find((bm) => this.versionOf(bm) === refVer) || null;
+
+    const laneSets = [this.lanes, ...[...this.diffLaneCache.values()].map((c) => c.lanes)];
+    for (const lanes of laneSets) {
+      for (const lane of lanes) {
+        const next = lane.customSampleName && renames.get(sampleStem(lane.customSampleName));
+        if (next) lane.customSampleName = next;
+      }
+    }
+
+    this.audioEngine.setRawSampleFiles(this.rawZipFiles);
+    this.updateBeatmapSelectors();
     this.renderLanesList();
     this.updateSequencerData();
-    return count;
   }
 
-  private checkNonStandardHitsounds(songAudioFilename: string) {
-    const standardOsuSampleRegex = /^(normal|soft|drum)-(hit(normal|whistle|finish|clap)|slider(slide|tick|whistle))\d*(\.(wav|ogg|mp3))?$/i;
-    const standardMiscSampleRegex = /^(spinnerbonus|spinnerspin|combobreak|sectionpass|sectionfail|nightcore-(clap|finish|hat|kick)|pause-loop|applause)\d*(\.(wav|ogg|mp3))?$/i;
-
-    const nonStandard: string[] = [];
-    const songLower = (songAudioFilename || '').toLowerCase();
-
-    for (const [filename, bytes] of this.rawZipFiles.entries()) {
-      const lower = filename.toLowerCase();
-      // Skip non-audio
-      if (!/\.(wav|ogg|mp3)$/i.test(lower)) continue;
-      // Skip main song audio
-      if (lower === songLower || lower === 'audio.mp3') continue;
-      // Skip dummy 44-byte silent files
-      if (bytes.length <= 44) continue;
-
-      if (!standardOsuSampleRegex.test(lower) && !standardMiscSampleRegex.test(lower)) {
-        nonStandard.push(filename);
-      }
-    }
-
-    for (const lane of this.lanes) {
-      if (lane.customSampleName) {
-        const fn = lane.customSampleName.trim();
-        const lower = fn.toLowerCase();
-        if (!standardOsuSampleRegex.test(lower) && !standardMiscSampleRegex.test(lower) && !nonStandard.includes(fn)) {
-          nonStandard.push(fn);
-        }
-      }
-    }
-
-    if (nonStandard.length > 0) {
-      this.showNonStandardNamingModal(nonStandard);
-    }
-  }
-
-  private showNonStandardNamingModal(files: string[]) {
+  private showRenameSamplesModal(files: string[], fromExport: boolean) {
     document.getElementById('hitsound-naming-modal')?.remove();
+    const suggestions = suggestStandardNames(files, this.rawZipFiles, this.allBeatmaps);
 
     const backdrop = document.createElement('div');
     backdrop.id = 'hitsound-naming-modal';
     backdrop.className = 'modal-backdrop';
-
-    const fileListHtml = files
-      .slice(0, 10)
-      .map((f) => `<div class="naming-advisory-file-item"><span>⚠️</span><span>${f}</span></div>`)
-      .join('');
-    const moreCount = files.length > 10 ? `<div class="naming-advisory-file-item" style="color:#8892b0">...and ${files.length - 10} more</div>` : '';
-
     backdrop.innerHTML = `
-      <div class="session-modal" style="width: 580px; max-width: 95vw;" role="dialog" aria-modal="true">
-        <div class="session-modal-header" style="background: #251c14;">
-          <span class="session-modal-tag" style="color: #ffb74d;">⚠️ Hitsound Naming Advisory</span>
-          <button class="btn-close-modal" id="btn-naming-modal-close" title="Dismiss">✕</button>
-        </div>
-        <div class="session-modal-body">
-          <h2 class="session-modal-title" style="font-size: 1.15rem;">Custom Hitsound File Names Detected</h2>
-          <p class="session-modal-desc">
-            This mapset contains <strong>${files.length}</strong> audio sample(s) that don't match osu!'s standard hitsound naming convention (e.g. <code>kicks 1.wav</code> instead of <code>drum-hitnormal.wav</code>).
+      <form class="modal" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+        <header class="modal-header">
+          <h2 id="rename-title">Rename custom hitsounds</h2>
+          <button type="button" class="icon-btn" data-close aria-label="Close">✕</button>
+        </header>
+        <div class="modal-body">
+          <p class="muted">
+            ${fromExport ? 'Export is blocked until these samples are renamed.' : `${files.length} sample${files.length > 1 ? 's don’t' : ' doesn’t'} follow osu! naming. Rename before exporting.`}
+            Files and every reference in the mapset are renamed together.
           </p>
-
-          <div class="naming-advisory-file-list">
-            ${fileListHtml}
-            ${moreCount}
+          <div class="rename-list">
+            ${files
+              .map(
+                (f, i) => `
+              <label class="rename-row">
+                <span class="rename-old" title="${esc(f)}">${esc(f)}</span>
+                <span class="rename-arrow">→</span>
+                <input class="input mono" name="r${i}" value="${esc(suggestions.get(f)!)}" spellcheck="false" autocomplete="off">
+                <span class="rename-err" data-err="${i}"></span>
+              </label>`
+              )
+              .join('')}
           </div>
-
-          <div class="naming-choice-cards">
-            <div class="naming-choice-card option-clear">
-              <strong class="choice-title" style="color: #ffb74d;">
-                <span>⚡</span> Option A: Clear Custom Names (Configure Manually)
-              </strong>
-              <p class="choice-desc">
-                Strips custom filenames from lanes so you can assign standard <strong>SampleSet</strong>, <strong>Addition</strong>, and <strong>Index</strong> parameters manually. The exported diff will strictly follow official osu! ranking criteria without non-standard filename references.
-              </p>
-            </div>
-
-            <div class="naming-choice-card option-preserve">
-              <strong class="choice-title" style="color: #4fc3f7;">
-                <span>💾</span> Option B: Preserve Custom Names
-              </strong>
-              <p class="choice-desc">
-                Preserves custom sample names and exports them directly via hitobject filename parameters (e.g. <code>:Kicks 1</code>). Recommended for mania keysounding, storyboards, or test diffs.
-              </p>
-            </div>
-          </div>
-
-          <div class="naming-advisory-guide-card">
-            <strong style="color: #fff; display: block; margin-bottom: 4px;">💡 Standard osu! Ranking Criteria Convention:</strong>
-            Standard osu! beatmaps organize hitsounds into sample sets, additions, and custom indices:
-            <ul style="margin: 6px 0 0 16px; padding: 0;">
-              <li><strong>Hit sounds:</strong> <code>{sampleSet}-hit{addition}[index].wav</code><br>
-                <em>(e.g., <code>soft-hitclap.wav</code>, <code>soft-hitclap2.wav</code>, <code>drum-hitwhistle.wav</code>)</em>
-              </li>
-              <li><strong>Slider sounds:</strong> <code>{sampleSet}-sliderslide[index].wav</code>, <code>{sampleSet}-slidertick.wav</code></li>
-              <li><strong>Sample sets:</strong> <code>soft</code>, <code>normal</code>, <code>drum</code></li>
-              <li><strong>Additions:</strong> <code>normal</code>, <code>whistle</code>, <code>finish</code>, <code>clap</code></li>
-            </ul>
-          </div>
+          <p class="hint mono">{soft|normal|drum}-hit{normal|whistle|finish|clap}[index].wav</p>
         </div>
-        <div class="session-modal-actions">
-          <button id="btn-naming-clear" class="btn btn-secondary" style="border-color: #ffb74d; color: #ffb74d;">
-            ⚡ Clear Custom Names
-          </button>
-          <button id="btn-naming-preserve" class="btn btn-primary" style="min-width: 150px;">
-            Keep Custom Names
-          </button>
-        </div>
-      </div>
+        <footer class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close>Later</button>
+          <button type="submit" class="btn btn-primary">Rename</button>
+        </footer>
+      </form>
     `;
-
     document.body.appendChild(backdrop);
 
-    const close = () => {
-      window.removeEventListener('keydown', keyHandler);
-      backdrop.remove();
-    };
+    const form = backdrop.querySelector('form')!;
+    const inputs = [...form.querySelectorAll<HTMLInputElement>('input')];
+    const close = () => backdrop.remove();
+    backdrop.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', close));
+    backdrop.addEventListener('keydown', (e) => e.key === 'Escape' && close());
+    inputs[0]?.focus();
 
-    document.getElementById('btn-naming-modal-close')?.addEventListener('click', () => {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const renaming = new Set(files.map(sampleStem));
+      const taken = new Set([...this.rawZipFiles.keys()].map(sampleStem).filter((s) => !renaming.has(s)));
+      const renames = new Map<string, string>();
+      let ok = true;
+      inputs.forEach((input, i) => {
+        let next = input.value.trim().toLowerCase();
+        if (next && !/\.(wav|ogg|mp3)$/.test(next)) next += files[i].match(/\.(wav|ogg|mp3)$/i)?.[0].toLowerCase() ?? '.wav';
+        const err = validateRename(next, taken);
+        form.querySelector(`[data-err="${i}"]`)!.textContent = err ?? '';
+        input.classList.toggle('invalid', Boolean(err));
+        if (err) ok = false;
+        taken.add(sampleStem(next));
+        renames.set(sampleStem(files[i]), next);
+      });
+      if (!ok) return;
+      this.applySampleRenames(renames);
       close();
+      this.showToast(`Renamed ${renames.size} sample${renames.size > 1 ? 's' : ''}`);
     });
-
-    document.getElementById('btn-naming-preserve')?.addEventListener('click', () => {
-      this.showToast('💾 Preserved custom sample names.');
-      close();
-    });
-
-    document.getElementById('btn-naming-clear')?.addEventListener('click', () => {
-      const cleared = this.clearCustomSampleNames();
-      this.showToast(`⚡ Cleared custom sample names from ${cleared} lane(s). Standard naming active!`);
-      close();
-    });
-
-    backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop) close();
-    });
-
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        close();
-      }
-    };
-    window.addEventListener('keydown', keyHandler);
   }
 
   private async loadSongAudio(file: File) {
@@ -2118,20 +2049,13 @@ export class App {
   private updateBeatmapSelectors() {
     const refSelect = document.getElementById('select-reference-diff') as HTMLSelectElement;
     if (refSelect) {
-      refSelect.innerHTML = '<option value="">None</option>';
-      const playables = this.allBeatmaps.filter(
-        (bm) => !(bm.metadata.Version || '').toLowerCase().includes('hitsound') && (bm.metadata.Version || '').toLowerCase() !== 'hs'
-      );
-      const diffsToShow = playables.length > 0 ? playables : this.allBeatmaps;
-
-      for (const bm of diffsToShow) {
+      refSelect.innerHTML = '<option value="">No diff</option>';
+      for (const bm of this.allBeatmaps) {
         const opt = document.createElement('option');
-        const ver = bm.metadata.Version || bm.fileName;
+        const ver = this.versionOf(bm);
         opt.value = ver;
-        opt.textContent = `${ver} (${bm.hitObjects.length} notes)`;
-        if (this.referenceBeatmap && (this.referenceBeatmap.metadata.Version || this.referenceBeatmap.fileName) === ver) {
-          opt.selected = true;
-        }
+        opt.textContent = `${ver} (${bm.hitObjects.length})`;
+        opt.selected = this.referenceBeatmap === bm;
         refSelect.appendChild(opt);
       }
     }
@@ -2185,28 +2109,29 @@ export class App {
     };
   }
 
-  public exportHitsoundDiff() {
-    const base = this.getBaseBeatmap();
-    const result = generateHitsoundBeatmap(this.lanes, this.triggers, base, 'Hitsounds');
+  /** Write back into the hitsound diff the lanes came from; never overwrite a playable diff. */
+  private exportDiffName(): string {
+    const src = this.hsSourceVersion;
+    return src && /hitsound|^hs$/i.test(src) ? src : 'Hitsounds';
+  }
 
-    const blob = new Blob([result.osuString], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = result.beatmap.fileName;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    alert(`Exported [Hitsounds].osu with ${result.totalNotes} hitsound notes placed at (256, 192)!`);
+  private generateExportDiff() {
+    const name = this.exportDiffName();
+    const result = generateHitsoundBeatmap(this.lanes, this.triggers, this.getBaseBeatmap(), name);
+    // Reuse the existing file name so the .osz replaces that diff instead of adding a copy
+    const existing = this.allBeatmaps.find((bm) => this.versionOf(bm) === name);
+    if (existing) result.beatmap.fileName = existing.fileName;
+    return result;
   }
 
   public async executeCopier(saveAsOsz: boolean) {
+    if (!this.ensureStandardSampleNames()) return;
     const consoleEl = document.getElementById('copier-console')!;
     consoleEl.style.display = 'block';
-    consoleEl.innerHTML = '<div class="log-line">Running Hitsound Copier...</div>';
+    consoleEl.innerHTML = '<div class="log-line">Running hitsound copier…</div>';
 
     // 1. Prepare Source Beatmap
-    const sourceResult = generateHitsoundBeatmap(this.lanes, this.triggers, this.getBaseBeatmap(), 'Hitsounds');
+    const sourceResult = this.generateExportDiff();
     const sourceBeatmap = sourceResult.beatmap;
 
     // 2. Collect selected target diffs
@@ -2215,11 +2140,11 @@ export class App {
       selectedFileNames.add(cb.value);
     });
 
-    const targetBeatmaps = this.allBeatmaps.filter((bm) => selectedFileNames.has(bm.fileName));
+    // The source diff is written as-is below; copying onto it would clobber it
+    const targetBeatmaps = this.allBeatmaps.filter((bm) => selectedFileNames.has(bm.fileName) && bm.fileName !== sourceBeatmap.fileName);
 
     if (targetBeatmaps.length === 0) {
-      consoleEl.innerHTML += '<div class="log-line error">❌ No target difficulties selected!</div>';
-      return;
+      consoleEl.innerHTML += `<div class="log-line">No target difficulties checked, only the [${esc(sourceBeatmap.metadata.Version)}] diff is written.</div>`;
     }
 
     // 3. Collect options
@@ -2236,59 +2161,73 @@ export class App {
       cleanExistingAdditions: (document.getElementById('opt-clean') as HTMLInputElement).checked,
     };
 
+
     const results = copyHitsounds(sourceBeatmap, targetBeatmaps, options);
 
     for (const res of results) {
       consoleEl.innerHTML += `
         <div class="log-line success">
-          ✔ <strong>${res.version}</strong>: Matched ${res.stats.matchedObjects}/${res.stats.totalObjects} objects 
+          <strong>${res.version}</strong>: matched ${res.stats.matchedObjects}/${res.stats.totalObjects} objects
           (${res.stats.sliderEdgesMatched} slider edges), merged ${res.stats.timingPointsMerged} timing points.
         </div>
       `;
     }
 
     // 4. Package output
+    const zip = new JSZip();
     if (saveAsOsz) {
-      const zip = new JSZip();
-
-      // Copy existing files (images, audio, etc.)
-      for (const [fname, bytes] of this.rawZipFiles.entries()) {
-        zip.file(fname, bytes);
-      }
-
-      // Add Hitsounds diff
-      zip.file(sourceBeatmap.fileName, sourceResult.osuString);
-
-      // Overwrite target diffs
-      for (const res of results) {
-        zip.file(res.fileName, res.osuString);
-      }
-
-      consoleEl.innerHTML += '<div class="log-line">Generating .osz archive...</div>';
-      const oszBlob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(oszBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${this.artist} - ${this.title}.osz`;
-      a.click();
-      URL.revokeObjectURL(url);
-      consoleEl.innerHTML += '<div class="log-line success">🎉 Done! Downloaded updated .osz archive.</div>';
-    } else {
-      // Download individual diffs as a zip
-      const zip = new JSZip();
-      zip.file(sourceBeatmap.fileName, sourceResult.osuString);
-      for (const res of results) {
-        zip.file(res.fileName, res.osuString);
-      }
-      const zipBlob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `hitsounded_diffs.zip`;
-      a.click();
-      URL.revokeObjectURL(url);
-      consoleEl.innerHTML += '<div class="log-line success">🎉 Done! Downloaded zip with updated .osu diffs.</div>';
+      for (const [fname, bytes] of this.rawZipFiles) zip.file(fname, bytes);
     }
+    for (const [fname, bytes] of this.laneSampleFiles()) zip.file(fname, bytes);
+    zip.file(sourceBeatmap.fileName, sourceResult.osuString);
+    for (const res of results) zip.file(res.fileName, res.osuString);
+
+    const name = saveAsOsz ? `${this.artist} - ${this.title}.osz` : 'hitsounded_diffs.zip';
+    this.download(await zip.generateAsync({ type: 'blob' }), name);
+    consoleEl.innerHTML += `<div class="log-line success">Downloaded ${name}</div>`;
+  }
+
+  /** Sample files the lanes reference by name (renamed archive samples and samples dropped on lanes). */
+  private laneSampleFiles(): Map<string, Uint8Array> {
+    const files = new Map<string, Uint8Array>();
+    const byStem = new Map([...this.rawZipFiles].map(([n, b]) => [sampleStem(n), [n, b] as const]));
+    for (const lane of this.lanes) {
+      if (!lane.customSampleName) continue;
+      const dropped = this.laneDroppedSamples.get(lane.id);
+      const zipped = byStem.get(sampleStem(lane.customSampleName));
+      if (dropped) files.set(lane.customSampleName, dropped);
+      else if (zipped && /\.(wav|ogg|mp3)$/i.test(zipped[0])) files.set(zipped[0], zipped[1]);
+    }
+    return files;
+  }
+
+  private download(blob: Blob, fileName: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  public exportHitsoundDiff() {
+    if (!this.ensureStandardSampleNames()) return;
+    const result = this.generateExportDiff();
+    const samples = this.laneSampleFiles();
+
+    if (samples.size === 0) {
+      this.download(new Blob([result.osuString], { type: 'text/plain;charset=utf-8' }), result.beatmap.fileName);
+      this.showToast(`Exported ${result.totalNotes} hitsound notes`);
+      return;
+    }
+    // The diff references custom sample files by name, so they ship together
+    const zip = new JSZip();
+    zip.file(result.beatmap.fileName, result.osuString);
+    for (const [fname, bytes] of samples) zip.file(fname, bytes);
+    zip.generateAsync({ type: 'blob' }).then((blob) => {
+      this.download(blob, result.beatmap.fileName.replace(/\.osu$/, '.zip'));
+      this.showToast(`Exported ${result.totalNotes} hitsound notes + ${samples.size} sample file${samples.size > 1 ? 's' : ''}`);
+    });
   }
 
   public async downloadFullOsz() {
