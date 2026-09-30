@@ -1,3 +1,7 @@
+# preface 
+ai doesnt know how does osu hitsounding works
+treat whatever written below as an ai slop
+
 # ⚡ Hitsound Studio (osu!)
 
 A lightweight, blazing-fast, web-based DAW and hitsounding environment designed specifically for osu! standard mappers.
