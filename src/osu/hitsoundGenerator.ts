@@ -31,6 +31,7 @@ export interface GeneratorResult {
   beatmap: OsuBeatmap;
   osuString: string;
   totalNotes: number;
+  lossyMerges: number; // timestamps where stacked lanes could not all fit in one circle
 }
 
 export function generateHitsoundBeatmap(
@@ -63,6 +64,7 @@ export function generateHitsoundBeatmap(
   const hitObjects: HitObject[] = [];
   const generatedGreenLines: TimingPoint[] = [];
 
+  let lossyMerges = 0;
   let lastActiveVolume = 100;
   let lastActiveIndex = 0;
   let lastActiveSampleSet = 2; // default to Soft for osu! hitsounds
@@ -70,133 +72,63 @@ export function generateHitsoundBeatmap(
   for (const t of timestamps) {
     const trList = timeMap.get(t)!;
 
-    let normalTrigger: { lane: Lane; vol: number } | null = null;
-    const additionTriggers: { lane: Lane; vol: number; bit: number; addSet: number; customIndex: number }[] = [];
-    const customSampleTriggers: { lane: Lane; vol: number; filename: string }[] = [];
-
-    for (const tr of trList) {
+    // One circle per timestamp: osu! gives a circle a single normal set, a single addition set,
+    // one index, one filename and a combined addition bitmask, so simultaneous lanes merge into it.
+    const layers = trList.map((tr) => {
       const lane = laneMap.get(tr.laneId)!;
-      const vol = tr.volume !== undefined ? tr.volume : lane.volume;
+      return { lane, vol: tr.volume !== undefined ? tr.volume : lane.volume, custom: lane.customSampleName?.trim() || '' };
+    });
+    const loudest = <T extends { vol: number }>(list: T[]): T | undefined =>
+      list.reduce<T | undefined>((a, b) => (!a || b.vol > a.vol ? b : a), undefined);
 
-      const customFile = lane.customSampleName?.trim();
-      if (customFile) {
-        customSampleTriggers.push({ lane, vol, filename: customFile });
-        continue;
-      }
+    const normalLayer = loudest(layers.filter((l) => !l.custom && l.lane.addition === 'None'));
+    const additionLayers = layers.filter((l) => !l.custom && l.lane.addition !== 'None');
+    const customLayer = loudest(layers.filter((l) => l.custom));
 
-      if (lane.addition === 'None') {
-        if (!normalTrigger || vol > normalTrigger.vol) {
-          normalTrigger = { lane, vol };
-        }
-      } else {
-        const bit = additionToBitmask(lane.addition);
-        const addSet = lane.additionSet !== 'Auto'
-          ? sampleSetToNumber(lane.additionSet)
-          : sampleSetToNumber(lane.sampleSet);
-        additionTriggers.push({
-          lane,
-          vol,
-          bit,
-          addSet: addSet > 0 ? addSet : 2,
-          customIndex: lane.customIndex || 0,
-        });
-      }
+    const additionSetOf = (l: { lane: Lane }) => {
+      const n = sampleSetToNumber(l.lane.additionSet !== 'Auto' ? l.lane.additionSet : l.lane.sampleSet);
+      return n > 0 ? n : 2;
+    };
+    const loudestAddition = loudest(additionLayers);
+    const additionSet = loudestAddition ? additionSetOf(loudestAddition) : 0;
+    const normalSet = customLayer && !normalLayer
+      ? 0
+      : normalLayer
+        ? sampleSetToNumber(normalLayer.lane.sampleSet) || 2
+        : additionSet || 2;
+    const soundLayers = layers.filter((l) => !l.custom);
+    const index = customLayer && !normalLayer && additionLayers.length === 0
+      ? 0
+      : Math.max(0, ...soundLayers.map((l) => l.lane.customIndex || 0));
+    const bitmask = layers.reduce((m, l) => m | additionToBitmask(l.lane.addition), 0);
+
+    // What one circle cannot express: report it instead of silently dropping layers
+    const distinct = (xs: number[]) => new Set(xs).size > 1;
+    if (
+      distinct(additionLayers.map(additionSetOf)) ||
+      distinct(soundLayers.map((l) => l.lane.customIndex || 0)) ||
+      layers.filter((l) => l.custom).length > 1
+    ) {
+      lossyMerges++;
     }
 
-    const baseNormalSet = normalTrigger ? sampleSetToNumber(normalTrigger.lane.sampleSet) : 2;
-    const baseNormalIndex = normalTrigger?.lane.customIndex || 0;
-    const baseNormalVol = normalTrigger ? normalTrigger.vol : 100;
-
-    const timestampHitObjects: HitObject[] = [];
-
-    if (additionTriggers.length === 0 && customSampleTriggers.length === 0) {
-      // HitNormal only
-      timestampHitObjects.push({
+    const timestampHitObjects: HitObject[] = [
+      {
         x: 256,
         y: 192,
         time: t,
         type: 1,
-        hitSound: 0,
+        hitSound: bitmask,
         hitSample: {
-          normalSet: baseNormalSet,
-          additionSet: baseNormalSet,
-          index: baseNormalIndex,
-          volume: baseNormalVol,
-          filename: '',
+          normalSet,
+          additionSet: additionSet || normalSet,
+          index,
+          volume: Math.max(...layers.map((l) => l.vol)),
+          filename: customLayer?.custom || '',
         },
         rawString: '',
-      });
-    } else {
-      // Group addition triggers by addSet
-      const addGroups = new Map<number, { bitmask: number; addSet: number; customIndex: number; maxVol: number }>();
-      for (const at of additionTriggers) {
-        if (!addGroups.has(at.addSet)) {
-          addGroups.set(at.addSet, { bitmask: 0, addSet: at.addSet, customIndex: at.customIndex, maxVol: at.vol });
-        }
-        const grp = addGroups.get(at.addSet)!;
-        grp.bitmask |= at.bit;
-        if (at.customIndex > 0 && at.customIndex > grp.customIndex) grp.customIndex = at.customIndex;
-        if (at.vol > grp.maxVol) grp.maxVol = at.vol;
-      }
-
-      let isFirst = true;
-      for (const grp of addGroups.values()) {
-        timestampHitObjects.push({
-          x: 256,
-          y: 192,
-          time: t,
-          type: 1,
-          hitSound: grp.bitmask,
-          hitSample: {
-            normalSet: isFirst && normalTrigger ? baseNormalSet : (isFirst ? grp.addSet : 0),
-            additionSet: grp.addSet,
-            index: grp.customIndex || (isFirst ? baseNormalIndex : 0),
-            volume: isFirst && normalTrigger ? Math.max(grp.maxVol, baseNormalVol) : grp.maxVol,
-            filename: '',
-          },
-          rawString: '',
-        });
-        isFirst = false;
-      }
-
-      // If there was a HitNormal lane, but no addition triggers (only custom sample triggers):
-      if (addGroups.size === 0 && normalTrigger) {
-        timestampHitObjects.push({
-          x: 256,
-          y: 192,
-          time: t,
-          type: 1,
-          hitSound: 0,
-          hitSample: {
-            normalSet: baseNormalSet,
-            additionSet: baseNormalSet,
-            index: baseNormalIndex,
-            volume: baseNormalVol,
-            filename: '',
-          },
-          rawString: '',
-        });
-      }
-
-      // Custom sample triggers
-      for (const ct of customSampleTriggers) {
-        timestampHitObjects.push({
-          x: 256,
-          y: 192,
-          time: t,
-          type: 1,
-          hitSound: additionToBitmask(ct.lane.addition),
-          hitSample: {
-            normalSet: 0,
-            additionSet: 0,
-            index: 0,
-            volume: ct.vol,
-            filename: ct.filename,
-          },
-          rawString: '',
-        });
-      }
-    }
+      },
+    ];
 
     // Check if we need to emit a green line for volume / custom index
     const primaryHo = timestampHitObjects[0];
@@ -286,5 +218,6 @@ export function generateHitsoundBeatmap(
     beatmap: hitsoundBeatmap,
     osuString,
     totalNotes: hitObjects.length,
+    lossyMerges,
   };
 }

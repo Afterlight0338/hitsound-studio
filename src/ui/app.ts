@@ -2210,6 +2210,11 @@ export class App {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  /** Stacked lanes that one circle can't fully express (mixed sets/indices, several custom files). */
+  private lossyNote(n: number): string {
+    return n > 0 ? `. ${n} stacked spot${n > 1 ? 's' : ''} merged lossy (mixed sample sets, indices or files)` : '';
+  }
+
   public exportHitsoundDiff() {
     if (!this.ensureStandardSampleNames()) return;
     const result = this.generateExportDiff();
@@ -2217,7 +2222,7 @@ export class App {
 
     if (samples.size === 0) {
       this.download(new Blob([result.osuString], { type: 'text/plain;charset=utf-8' }), result.beatmap.fileName);
-      this.showToast(`Exported ${result.totalNotes} hitsound notes`);
+      this.showToast(`Exported ${result.totalNotes} hitsound notes${this.lossyNote(result.lossyMerges)}`);
       return;
     }
     // The diff references custom sample files by name, so they ship together
@@ -2226,7 +2231,7 @@ export class App {
     for (const [fname, bytes] of samples) zip.file(fname, bytes);
     zip.generateAsync({ type: 'blob' }).then((blob) => {
       this.download(blob, result.beatmap.fileName.replace(/\.osu$/, '.zip'));
-      this.showToast(`Exported ${result.totalNotes} hitsound notes + ${samples.size} sample file${samples.size > 1 ? 's' : ''}`);
+      this.showToast(`Exported ${result.totalNotes} hitsound notes + ${samples.size} sample file${samples.size > 1 ? 's' : ''}${this.lossyNote(result.lossyMerges)}`);
     });
   }
 

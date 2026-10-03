@@ -370,12 +370,24 @@ if (fs.existsSync(fallenPath)) {
   ];
   const gen11 = generateHitsoundBeatmap(lanes11, triggers11, beatmap, 'Hitsounds');
   const hos11 = gen11.beatmap.hitObjects.filter((h) => h.time === 6000);
-  if (hos11.length !== 2) throw new Error(`Test 11: Expected 2 layered notes at 6000ms, got ${hos11.length}`);
-  const whistleNote = hos11.find((h) => h.hitSound === 2);
-  const clapNote = hos11.find((h) => h.hitSound === 8);
-  if (!whistleNote || whistleNote.hitSample.additionSet !== 2) throw new Error('Test 11: Soft Whistle layer missing or wrong additionSet!');
-  if (!clapNote || clapNote.hitSample.additionSet !== 3) throw new Error('Test 11: Drum Clap layer missing or wrong additionSet!');
-  console.log('[PASS] Test 11: Multi-layer additions verified! Soft Whistle and Drum Clap cleanly layered at same timestamp.');
+  if (hos11.length !== 1) throw new Error(`Test 11: Expected 1 merged note at 6000ms, got ${hos11.length}`);
+  if (hos11[0].hitSound !== 10) throw new Error(`Test 11: Expected whistle+clap bitmask 10, got ${hos11[0].hitSound}`);
+  if (hos11[0].hitSample.additionSet !== 3) throw new Error('Test 11: Expected the louder Drum Clap to win additionSet = 3');
+  if (gen11.lossyMerges !== 1) throw new Error(`Test 11: Expected lossyMerges = 1 for mismatched addition sets, got ${gen11.lossyMerges}`);
+  console.log('[PASS] Test 11: Whistle (Soft) + Clap (Drum) merge into one circle and are reported as lossy.');
+}
+
+// Test 15: three simultaneous hitsounds become one circle
+{
+  const mk = (id: string, addition: Lane['addition']): Lane => ({ id, name: id, sampleSet: 'Soft', addition, additionSet: 'Auto', customIndex: 0, volume: 80, color: '#fff', muted: false, solo: false });
+  const lanes15 = [mk('n', 'None'), mk('w', 'Whistle'), mk('c', 'Clap')];
+  const triggers15: Trigger[] = lanes15.map((l, i) => ({ id: `t15_${i}`, laneId: l.id, time: 9000 }));
+  const gen15 = generateHitsoundBeatmap(lanes15, triggers15, beatmap, 'Hitsounds');
+  const hos15 = gen15.beatmap.hitObjects.filter((h) => h.time === 9000);
+  if (hos15.length !== 1) throw new Error(`Test 15: Expected 1 circle for 3 simultaneous hitsounds, got ${hos15.length}`);
+  if (hos15[0].hitSound !== 10) throw new Error(`Test 15: Expected bitmask 10 (whistle+clap), got ${hos15[0].hitSound}`);
+  if (gen15.lossyMerges !== 0) throw new Error(`Test 15: Same-set merge must not be lossy, got ${gen15.lossyMerges}`);
+  console.log('[PASS] Test 15: Hitnormal + whistle + clap at one timestamp export as a single circle.');
 }
 
 // Test 12: Custom Sample Filename Preservation
@@ -390,10 +402,11 @@ if (fs.existsSync(fallenPath)) {
   ];
   const gen12 = generateHitsoundBeatmap(lanes12, triggers12, beatmap, 'Hitsounds');
   const hos12 = gen12.beatmap.hitObjects.filter((h) => h.time === 7000);
-  const kickHo = hos12.find((h) => h.hitSample.filename === 'Kicks 1');
-  const snareHo = hos12.find((h) => h.hitSample.filename === 'snares 3');
-  if (!kickHo || !snareHo) throw new Error('Test 12: Custom sample filenames missing from generated notes!');
-  console.log('[PASS] Test 12: Custom sample filenames preserved in generated hitsound diff: Kicks 1, snares 3');
+  if (hos12.length !== 1) throw new Error(`Test 12: Expected 1 merged circle, got ${hos12.length}`);
+  if (hos12[0].hitSample.filename !== 'Kicks 1') throw new Error(`Test 12: Expected loudest filename "Kicks 1", got "${hos12[0].hitSample.filename}"`);
+  if (hos12[0].hitSound !== 8) throw new Error(`Test 12: Expected clap bit kept (8), got ${hos12[0].hitSound}`);
+  if (gen12.lossyMerges !== 1) throw new Error(`Test 12: Two custom filenames must be reported lossy, got ${gen12.lossyMerges}`);
+  console.log('[PASS] Test 12: Two custom samples merge into one circle (loudest filename kept) and are reported lossy');
 
   // Test Copier combining multi-source objects
   const target12 = JSON.parse(JSON.stringify(beatmap)) as OsuBeatmap;
@@ -418,7 +431,7 @@ if (fs.existsSync(fallenPath)) {
   // 1. Before clearing: outputs custom filename references
   const genBefore = generateHitsoundBeatmap(lanes13, triggers13, beatmap, 'Hitsounds');
   const serializedBefore = serializeOsu(genBefore.beatmap);
-  if (!serializedBefore.includes(':Kicks 1') || !serializedBefore.includes(':snares 3')) {
+  if (!serializedBefore.includes(':Kicks 1')) {
     throw new Error('Test 13: Expected custom filenames in serialized diff before clearing!');
   }
 
@@ -453,7 +466,7 @@ if (fs.existsSync(fallenPath)) {
   console.log('[PASS] Test 13: Clear Custom Sample Names correctly strips filename tags and outputs clean ranking-compliant hitsounds!');
 }
 
-console.log('\n>>> ALL 13 CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
+console.log('\n>>> ALL CORE TESTS PASSED WITH 100% INTEGRITY! <<<');
 
 // Test 14: custom sample rename (files + references)
 {
